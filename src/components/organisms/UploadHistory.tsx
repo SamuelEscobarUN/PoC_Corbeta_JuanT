@@ -20,7 +20,11 @@ import {
   MenuItem,
   Button,
   CircularProgress,
+  IconButton,
+  Tooltip,
 } from '@mui/material';
+import DeleteIcon from '@mui/icons-material/Delete';
+import VisibilityIcon from '@mui/icons-material/Visibility';
 import type { CascadeStage } from '../../types/csv';
 import type { UploadRecord, UploadStatus } from '../../types/upload';
 import { uploadService } from '../../services/upload';
@@ -40,14 +44,17 @@ const STAGES = Object.keys(STAGE_DISPLAY_NAMES) as CascadeStage[];
 export interface UploadHistoryProps {
   /** Increment this value to trigger a refresh of the history. */
   refreshTrigger?: number;
+  /** Called when user wants to preview a specific upload. */
+  onPreview?: (record: UploadRecord) => void;
 }
 
-export default function UploadHistory({ refreshTrigger = 0 }: UploadHistoryProps) {
+export default function UploadHistory({ refreshTrigger = 0, onPreview }: UploadHistoryProps) {
   const [records, setRecords] = useState<UploadRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [stageFilter, setStageFilter] = useState<CascadeStage | ''>('');
   const [nextToken, setNextToken] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   const fetchHistory = useCallback(
     async (token?: string | null) => {
@@ -95,6 +102,19 @@ export default function UploadHistory({ refreshTrigger = 0 }: UploadHistoryProps
     }
   };
 
+  const handleDelete = async (record: UploadRecord) => {
+    if (!confirm(`¿Eliminar "${record.fileName}"?`)) return;
+    setDeleting(record.uploadId);
+    try {
+      await uploadService.deleteUpload(record.uploadId, record.s3Key);
+      setRecords((prev) => prev.filter((r) => r.uploadId !== record.uploadId));
+    } catch {
+      // silent
+    } finally {
+      setDeleting(null);
+    }
+  };
+
   return (
     <Paper sx={{ p: 3 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 2 }}>
@@ -137,6 +157,7 @@ export default function UploadHistory({ refreshTrigger = 0 }: UploadHistoryProps
                   <TableCell>Estado</TableCell>
                   <TableCell>Cargado por</TableCell>
                   <TableCell>Fecha</TableCell>
+                  <TableCell align="center">Acciones</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -157,6 +178,28 @@ export default function UploadHistory({ refreshTrigger = 0 }: UploadHistoryProps
                       </TableCell>
                       <TableCell>{record.uploadedBy}</TableCell>
                       <TableCell>{formatDate(record.uploadedAt)}</TableCell>
+                      <TableCell align="center">
+                        <Box sx={{ display: 'flex', gap: 0.5, justifyContent: 'center' }}>
+                          {onPreview && (
+                            <Tooltip title="Vista previa">
+                              <IconButton size="small" onClick={() => onPreview(record)} aria-label="Vista previa">
+                                <VisibilityIcon fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
+                          )}
+                          <Tooltip title="Eliminar">
+                            <IconButton
+                              size="small"
+                              color="error"
+                              onClick={() => handleDelete(record)}
+                              disabled={deleting === record.uploadId}
+                              aria-label="Eliminar archivo"
+                            >
+                              {deleting === record.uploadId ? <CircularProgress size={16} /> : <DeleteIcon fontSize="small" />}
+                            </IconButton>
+                          </Tooltip>
+                        </Box>
+                      </TableCell>
                     </TableRow>
                   );
                 })}

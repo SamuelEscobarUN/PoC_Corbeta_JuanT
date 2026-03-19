@@ -37,9 +37,19 @@ export interface FileUploadFormProps {
   onUploadComplete?: (result: UploadResult) => void;
 }
 
+/** Delimiter options for CSV parsing. */
+const DELIMITER_OPTIONS: { value: string; label: string }[] = [
+  { value: 'auto', label: 'Auto-detectar' },
+  { value: ',', label: 'Coma (,)' },
+  { value: '\t', label: 'Tabulador (Tab)' },
+  { value: ';', label: 'Punto y coma (;)' },
+  { value: '|', label: 'Pipe (|)' },
+];
+
 export default function FileUploadForm({ onUploadComplete }: FileUploadFormProps) {
   const { user } = useAuth();
   const [stage, setStage] = useState<CascadeStage | ''>('');
+  const [delimiter, setDelimiter] = useState('auto');
   const [file, setFile] = useState<File | null>(null);
   const [errors, setErrors] = useState<ValidationError[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -63,7 +73,8 @@ export default function FileUploadForm({ onUploadComplete }: FileUploadFormProps
       const content = await file.text();
 
       // Client-side validation first
-      const validation = uploadService.validateFile(content, stage);
+      const delim = delimiter === 'auto' ? undefined : delimiter;
+      const validation = uploadService.validateFile(content, stage, delim);
       if (!validation.isValid) {
         setErrors(validation.errors);
         setUploading(false);
@@ -101,27 +112,47 @@ export default function FileUploadForm({ onUploadComplete }: FileUploadFormProps
 
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
         {/* Stage selector */}
-        <FormControl fullWidth>
-          <InputLabel id="stage-select-label">Etapa de la Cascada</InputLabel>
-          <Select
-            labelId="stage-select-label"
-            id="stage-select"
-            value={stage}
-            label="Etapa de la Cascada"
-            onChange={(e) => {
-              setStage(e.target.value as CascadeStage);
-              setErrors([]);
-              setUploadResult(null);
-            }}
-            disabled={uploading}
-          >
-            {STAGES.map((s) => (
-              <MenuItem key={s} value={s}>
-                {STAGE_DISPLAY_NAMES[s]}
-              </MenuItem>
-            ))}
-          </Select>
-        </FormControl>
+        <Box sx={{ display: 'flex', gap: 2 }}>
+          <FormControl sx={{ flex: 2 }}>
+            <InputLabel id="stage-select-label">Etapa de la Cascada</InputLabel>
+            <Select
+              labelId="stage-select-label"
+              id="stage-select"
+              value={stage}
+              label="Etapa de la Cascada"
+              onChange={(e) => {
+                setStage(e.target.value as CascadeStage);
+                setErrors([]);
+                setUploadResult(null);
+              }}
+              disabled={uploading}
+            >
+              {STAGES.map((s) => (
+                <MenuItem key={s} value={s}>
+                  {STAGE_DISPLAY_NAMES[s]}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+
+          <FormControl sx={{ flex: 1 }}>
+            <InputLabel id="delimiter-select-label">Separador</InputLabel>
+            <Select
+              labelId="delimiter-select-label"
+              id="delimiter-select"
+              value={delimiter}
+              label="Separador"
+              onChange={(e) => setDelimiter(e.target.value)}
+              disabled={uploading}
+            >
+              {DELIMITER_OPTIONS.map((d) => (
+                <MenuItem key={d.value} value={d.value}>
+                  {d.label}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        </Box>
 
         {/* Drag-and-drop zone */}
         <FileDropZone

@@ -7,7 +7,7 @@
  * for DynamoDB operations via the Upload model.
  */
 
-import { uploadData } from 'aws-amplify/storage';
+import { uploadData, remove, downloadData } from 'aws-amplify/storage';
 import { generateClient } from 'aws-amplify/data';
 
 import type { Schema } from '../../amplify/data/resource';
@@ -47,8 +47,8 @@ export class UploadService {
    * Validate the CSV file format for the given cascade stage.
    * Delegates to the csv-validator module.
    */
-  validateFile(content: string, stage: CascadeStage): ValidationResult {
-    return validateFileFormat(content, stage);
+  validateFile(content: string, stage: CascadeStage, delimiter?: string): ValidationResult {
+    return validateFileFormat(content, stage, delimiter);
   }
 
   /**
@@ -115,11 +115,8 @@ export class UploadService {
         s3Key,
       );
 
-      // 5. Transition status to 'processing' to trigger transformation
-      await client.models.Upload.update({
-        uploadId,
-        status: 'processing',
-      });
+      // 5. Upload complete — status stays as 'uploaded'
+      // Transformation is done client-side in the preview tab.
 
       return {
         uploadId,
@@ -263,6 +260,29 @@ export class UploadService {
       }
       return true;
     });
+  }
+
+  /**
+   * Delete an upload: removes the file from S3 and the record from DynamoDB.
+   */
+  async deleteUpload(uploadId: string, s3Key: string): Promise<void> {
+    await remove({
+      path: s3Key,
+      options: { bucket: 'reconciliationStorage' },
+    });
+    await client.models.Upload.delete({ uploadId });
+  }
+
+  /**
+   * Download a file from S3 and return its text content.
+   */
+  async downloadFile(s3Key: string): Promise<string> {
+    const result = await downloadData({
+      path: s3Key,
+      options: { bucket: 'reconciliationStorage' },
+    }).result;
+    const blob = result.body as unknown as Blob;
+    return await blob.text();
   }
 }
 

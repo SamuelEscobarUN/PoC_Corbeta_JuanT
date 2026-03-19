@@ -28,16 +28,77 @@ export function detectDelimiter(headerLine: string): string {
 }
 
 /**
- * Parse the header row from raw CSV content.
- * Auto-detects the delimiter (tab, semicolon, pipe, or comma)
- * and trims whitespace / BOM from each column name.
+ * Split a single CSV line respecting quoted fields (RFC 4180).
+ * Handles: "field", "field with ""escaped"" quotes", empty fields.
+ *
+ * A quoted field must START with a quote (right after delimiter or at
+ * the beginning of the line). Quotes appearing mid-field are treated
+ * as literal characters.
+ *
+ * Tolerant mode: if a closing quote is followed by a non-delimiter
+ * character (malformed CSV), the quote is treated as literal and
+ * parsing continues inside the quoted field.
  */
-function parseHeaders(firstLine: string): string[] {
-  const delimiter = detectDelimiter(firstLine);
-  return firstLine
-    .replace(/^\uFEFF/, '') // strip UTF-8 BOM
-    .split(delimiter)
-    .map((h) => h.trim());
+export function splitCSVLine(line: string, delimiter: string): string[] {
+  const fields: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  let fieldStart = true;
+  let i = 0;
+
+  while (i < line.length) {
+    const ch = line[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        if (i + 1 < line.length && line[i + 1] === '"') {
+          // Escaped quote ""
+          current += '"';
+          i += 2;
+        } else if (i + 1 >= line.length || line[i + 1] === delimiter) {
+          // Proper close: quote followed by delimiter or end of line
+          inQuotes = false;
+          i++;
+        } else {
+          // Malformed: quote followed by non-delimiter — treat as literal
+          current += '"';
+          i++;
+        }
+      } else {
+        current += ch;
+        i++;
+      }
+    } else {
+      if (ch === '"' && fieldStart) {
+        inQuotes = true;
+        fieldStart = false;
+        i++;
+      } else if (ch === delimiter) {
+        fields.push(current.trim());
+        current = '';
+        fieldStart = true;
+        i++;
+      } else {
+        current += ch;
+        fieldStart = false;
+        i++;
+      }
+    }
+  }
+  fields.push(current.trim());
+  return fields;
+}
+
+/**
+ * Parse the header row from raw CSV content.
+ * Uses the given delimiter (or auto-detects) and handles quoted headers.
+ */
+function parseHeaders(firstLine: string, delimiter?: string): string[] {
+  const cleaned = firstLine.replace(/^\uFEFF/, '');
+  const delim = delimiter ?? detectDelimiter(cleaned);
+  return splitCSVLine(cleaned, delim).map((h) =>
+    h.replace(/^"|"$/g, '').trim(),
+  );
 }
 
 /**
@@ -81,23 +142,26 @@ export function parseMonetaryValue(raw: string): number {
  * Parse a full CSV string into an array of objects with normalised keys.
  *
  * - Headers are lowercased and trimmed.
- * - Delimiter is auto-detected.
+ * - Supports quoted fields (RFC 4180): "value", "value with ""quotes""".
+ * - Delimiter can be specified or auto-detected.
  * - Empty trailing rows are skipped.
  *
+ * @param content   - Raw CSV text.
+ * @param delimiter - Optional delimiter override. Auto-detected if omitted.
  * @returns Array of records where keys are the lowercase header names.
  */
-export function parseCSV(content: string): Record<string, string>[] {
+export function parseCSV(content: string, delimiter?: string): Record<string, string>[] {
   const trimmed = content.trim();
   if (!trimmed) return [];
 
   const lines = trimmed.split(/\r?\n/);
   if (lines.length < 2) return [];
 
-  const delimiter = detectDelimiter(lines[0]);
-  const headers = lines[0]
-    .replace(/^\uFEFF/, '')
-    .split(delimiter)
-    .map((h) => h.trim().toLowerCase());
+  const headerLine = lines[0].replace(/^\uFEFF/, '');
+  const delim = delimiter ?? detectDelimiter(headerLine);
+  const headers = splitCSVLine(headerLine, delim).map((h) =>
+    h.replace(/^"|"$/g, '').trim().toLowerCase(),
+  );
 
   const records: Record<string, string>[] = [];
 
@@ -105,11 +169,11 @@ export function parseCSV(content: string): Record<string, string>[] {
     const line = lines[i].trim();
     if (!line) continue;
 
-    const values = line.split(delimiter).map((v) => v.trim());
+    const values = splitCSVLine(line, delim);
     const record: Record<string, string> = {};
 
     for (let j = 0; j < headers.length; j++) {
-      record[headers[j]] = values[j] ?? '';
+      record[headers[j]] = (values[j] ?? '').replace(/^"|"$/g, '');
     }
 
     records.push(record);
@@ -134,6 +198,7 @@ export function parseCSV(content: string): Record<string, string>[] {
 export function validateFileFormat(
   content: string,
   stage: CascadeStage,
+  delimiter?: string,
 ): ValidationResult {
   const errors: ValidationError[] = [];
 
@@ -156,7 +221,7 @@ export function validateFileFormat(
   const lines = trimmed.split(/\r?\n/);
 
   // 2. Parse headers and check required columns (case-insensitive)
-  const headers = parseHeaders(lines[0]);
+  const headers = parseHeaders(lines[0], delimiter);
   const headersLower = headers.map((h) => h.toLowerCase());
   const requiredColumns = STAGE_COLUMNS[stage];
 
