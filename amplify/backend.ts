@@ -2,8 +2,7 @@ import { defineBackend } from '@aws-amplify/backend';
 import { auth } from './auth/resource';
 import { data } from './data/resource';
 import { storage } from './storage/resource';
-// TODO: Re-enable when Docker is available for Lambda bundling
-// import { reconciliationApi } from './functions/reconciliation-api/resource';
+import { reconciliationApi } from './functions/reconciliation-api/resource';
 
 /**
  * Amplify Gen 2 backend definition.
@@ -14,5 +13,5 @@ export const backend = defineBackend({
   auth,
   data,
   storage,
-  // reconciliationApi,
+  reconciliationApi,
 });
