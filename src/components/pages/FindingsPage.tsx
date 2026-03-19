@@ -1,7 +1,6 @@
 /**
- * FindingsPage — genera y muestra hallazgos a partir de las discrepancias
- * detectadas. Usa análisis determinista (sin IA) cuando Bedrock no está
- * disponible.
+ * FindingsPage — genera hallazgos a partir de discrepancias usando
+ * Amazon Bedrock Nova Premier vía custom query de AppSync.
  */
 import { useState, useEffect, useCallback } from 'react';
 import {
@@ -18,8 +17,15 @@ import {
   Alert,
   CircularProgress,
   Button,
+  LinearProgress,
+  TextField,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
 } from '@mui/material';
 import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh';
+import SearchIcon from '@mui/icons-material/Search';
 import { generateClient } from 'aws-amplify/data';
 import type { Schema } from '../../../amplify/data/resource';
 
@@ -54,54 +60,22 @@ const SEVERITY_COLORS: Record<string, 'error' | 'warning' | 'info' | 'default'> 
   low: 'info',
 };
 
-/** Genera un finding determinista a partir de una discrepancia. */
-function generateFindingFromDiscrepancy(disc: DiscrepancyRecord): Omit<Finding, 'findingId'> {
-  const now = new Date().toISOString();
-  let explanation = '';
-  let probableCause = '';
-  let recommendation = '';
-  let severity = 'medium';
-
-  switch (disc.type) {
-    case 'missing_invoice':
-      explanation = `La factura ${disc.invoice} está presente en ${disc.sourceStage} pero no aparece en ${disc.targetStage}.`;
-      probableCause = 'Error en la transmisión de datos entre etapas o retraso en el procesamiento.';
-      recommendation = 'Verificar el proceso de sincronización entre etapas y reprocesar la factura.';
-      severity = 'high';
-      break;
-    case 'total_difference':
-      explanation = `El total de la factura ${disc.invoice} difiere: ${disc.expectedValue ?? '?'} en origen vs ${disc.actualValue ?? '?'} en destino.`;
-      probableCause = 'Diferencia en el cálculo de impuestos, descuentos o redondeo entre sistemas.';
-      recommendation = 'Revisar las reglas de cálculo de totales en ambas etapas y corregir la diferencia.';
-      severity = 'medium';
-      break;
-    case 'item_count_difference':
-      explanation = `La factura ${disc.invoice} tiene ${disc.expectedValue ?? '?'} ítems en origen pero ${disc.actualValue ?? '?'} en destino.`;
-      probableCause = 'Ítems filtrados, duplicados o no procesados durante la transformación.';
-      recommendation = 'Comparar los ítems individuales para identificar cuáles faltan o sobran.';
-      severity = 'medium';
-      break;
-    case 'missing_item':
-      explanation = `El ítem ${disc.expectedValue ?? '?'} de la factura ${disc.invoice} no aparece en ${disc.targetStage}.`;
-      probableCause = 'El ítem fue excluido durante la transformación o no cumplió criterios de validación.';
-      recommendation = 'Verificar las reglas de transformación y validación para este tipo de ítem.';
-      severity = 'high';
-      break;
-    default:
-      explanation = `Discrepancia detectada en factura ${disc.invoice}.`;
-      probableCause = 'Causa no determinada.';
-      recommendation = 'Revisar manualmente la discrepancia.';
-  }
-
-  return { discrepancyId: disc.discrepancyId, explanation, probableCause, recommendation, severity, analyzedAt: now };
-}
+const SEVERITY_LABELS: Record<string, string> = {
+  critical: 'Crítico',
+  high: 'Alto',
+  medium: 'Medio',
+  low: 'Bajo',
+};
 
 export default function FindingsPage() {
   const [findings, setFindings] = useState<Finding[]>([]);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [severityFilter, setSeverityFilter] = useState('');
 
   const loadFindings = useCallback(async () => {
     try {
@@ -115,6 +89,7 @@ export default function FindingsPage() {
         severity: f.severity ?? 'medium',
         analyzedAt: f.analyzedAt,
       }));
+      mapped.sort((a, b) => b.analyzedAt.localeCompare(a.analyzedAt));
       setFindings(mapped);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al cargar hallazgos');
@@ -129,6 +104,7 @@ export default function FindingsPage() {
     setGenerating(true);
     setError(null);
     setSuccessMsg(null);
+    setProgress(0);
 
     try {
       // 1. Load all discrepancies
@@ -150,11 +126,9 @@ export default function FindingsPage() {
         return;
       }
 
-      // 2. Get existing finding discrepancyIds to avoid duplicates
+      // 2. Filter out discrepancies that already have findings
       const { data: existingFindings } = await client.models.Finding.list({ limit: 1000 });
       const existingDiscIds = new Set((existingFindings ?? []).map((f) => f.discrepancyId));
-
-      // 3. Generate findings for discrepancies without existing findings
       const newDiscrepancies = discrepancies.filter((d) => !existingDiscIds.has(d.discrepancyId));
 
       if (newDiscrepancies.length === 0) {
@@ -163,24 +137,64 @@ export default function FindingsPage() {
         return;
       }
 
+      setProgress(10);
+
+      // 3. Call Bedrock via custom query (batches of 20)
+      const BATCH_SIZE = 20;
       let created = 0;
-      for (const disc of newDiscrepancies) {
-        const finding = generateFindingFromDiscrepancy(disc);
-        const findingId = crypto.randomUUID();
-        await client.models.Finding.create({
-          discrepancyId: finding.discrepancyId,
-          findingId,
-          explanation: finding.explanation,
-          probableCause: finding.probableCause,
-          recommendation: finding.recommendation,
-          severity: finding.severity as 'low' | 'medium' | 'high' | 'critical',
-          itemDetails: null,
-          analyzedAt: finding.analyzedAt,
-        });
-        created++;
+      const totalBatches = Math.ceil(newDiscrepancies.length / BATCH_SIZE);
+
+      for (let i = 0; i < newDiscrepancies.length; i += BATCH_SIZE) {
+        const batch = newDiscrepancies.slice(i, i + BATCH_SIZE);
+        const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+
+        const payload = batch.map((d) => ({
+          discrepancyId: d.discrepancyId,
+          invoice: d.invoice,
+          type: d.type,
+          sourceStage: d.sourceStage,
+          targetStage: d.targetStage,
+          expectedValue: d.expectedValue ?? undefined,
+          actualValue: d.actualValue ?? undefined,
+        }));
+
+        try {
+          const { data: result } = await client.queries.analyzeFindings({
+            discrepancies: JSON.stringify(payload),
+          });
+
+          const aiFindings: Array<{
+            discrepancyId: string;
+            explanation: string;
+            probableCause: string;
+            recommendation: string;
+            severity: string;
+          }> = result ? JSON.parse(result) : [];
+
+          // 4. Save each finding to DynamoDB
+          for (const af of aiFindings) {
+            const findingId = crypto.randomUUID();
+            await client.models.Finding.create({
+              discrepancyId: af.discrepancyId,
+              findingId,
+              explanation: af.explanation,
+              probableCause: af.probableCause,
+              recommendation: af.recommendation,
+              severity: (af.severity as 'low' | 'medium' | 'high' | 'critical') ?? 'medium',
+              itemDetails: null,
+              analyzedAt: new Date().toISOString(),
+            });
+            created++;
+          }
+        } catch (batchErr) {
+          console.error(`Error en batch ${batchNum}:`, batchErr);
+        }
+
+        setProgress(10 + Math.round((batchNum / totalBatches) * 85));
       }
 
-      setSuccessMsg(`Se generaron ${created} hallazgos nuevos.`);
+      setProgress(100);
+      setSuccessMsg(`Se generaron ${created} hallazgos con IA (Nova Premier).`);
       await loadFindings();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al generar hallazgos');
@@ -188,6 +202,21 @@ export default function FindingsPage() {
       setGenerating(false);
     }
   }, [loadFindings]);
+
+  // Filtered findings
+  const filtered = findings.filter((f) => {
+    if (severityFilter && f.severity !== severityFilter) return false;
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      return (
+        f.explanation.toLowerCase().includes(q) ||
+        f.probableCause.toLowerCase().includes(q) ||
+        f.recommendation.toLowerCase().includes(q) ||
+        f.discrepancyId.toLowerCase().includes(q)
+      );
+    }
+    return true;
+  });
 
   if (loading) {
     return (
@@ -203,7 +232,7 @@ export default function FindingsPage() {
 
       <Paper sx={{ p: 3 }}>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          Genera hallazgos automáticos a partir de las discrepancias detectadas.
+          Genera hallazgos automáticos usando Amazon Bedrock (Nova Premier) a partir de las discrepancias detectadas.
         </Typography>
         <Button
           variant="contained"
@@ -211,55 +240,93 @@ export default function FindingsPage() {
           onClick={handleGenerate}
           disabled={generating}
         >
-          {generating ? 'Generando hallazgos...' : 'Generar Hallazgos'}
+          {generating ? 'Analizando con IA...' : 'Generar Hallazgos con IA'}
         </Button>
+        {generating && (
+          <Box sx={{ mt: 2 }}>
+            <LinearProgress variant="determinate" value={progress} />
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+              Procesando discrepancias con Nova Premier... {progress}%
+            </Typography>
+          </Box>
+        )}
       </Paper>
 
       {error && <Alert severity="error">{error}</Alert>}
       {successMsg && <Alert severity="success">{successMsg}</Alert>}
 
-      {findings.length === 0 ? (
+      {findings.length > 0 && (
+        <Paper sx={{ p: 2 }}>
+          <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap', alignItems: 'center' }}>
+            <TextField
+              size="small"
+              placeholder="Buscar en hallazgos..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              slotProps={{ input: { startAdornment: <SearchIcon sx={{ mr: 1, color: 'text.secondary' }} /> } }}
+              sx={{ minWidth: 250 }}
+            />
+            <FormControl size="small" sx={{ minWidth: 150 }}>
+              <InputLabel>Severidad</InputLabel>
+              <Select
+                value={severityFilter}
+                label="Severidad"
+                onChange={(e) => setSeverityFilter(e.target.value)}
+              >
+                <MenuItem value="">Todas</MenuItem>
+                <MenuItem value="critical">Crítico</MenuItem>
+                <MenuItem value="high">Alto</MenuItem>
+                <MenuItem value="medium">Medio</MenuItem>
+                <MenuItem value="low">Bajo</MenuItem>
+              </Select>
+            </FormControl>
+            <Typography variant="body2" color="text.secondary">
+              {filtered.length} de {findings.length} hallazgos
+            </Typography>
+          </Box>
+
+          <TableContainer sx={{ maxHeight: 600 }}>
+            <Table size="small" stickyHeader>
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ fontWeight: 'bold' }}>Severidad</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold' }}>Explicación</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold' }}>Causa Probable</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold' }}>Recomendación</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold' }}>Fecha</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {filtered.map((f) => (
+                  <TableRow key={f.findingId}>
+                    <TableCell>
+                      <Chip
+                        label={SEVERITY_LABELS[f.severity] ?? f.severity}
+                        size="small"
+                        color={SEVERITY_COLORS[f.severity] ?? 'default'}
+                      />
+                    </TableCell>
+                    <TableCell sx={{ maxWidth: 280 }}>{f.explanation}</TableCell>
+                    <TableCell sx={{ maxWidth: 220 }}>{f.probableCause}</TableCell>
+                    <TableCell sx={{ maxWidth: 220 }}>{f.recommendation}</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                      {new Date(f.analyzedAt).toLocaleDateString('es-CO')}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </Paper>
+      )}
+
+      {findings.length === 0 && !error && (
         <Paper sx={{ p: 4, textAlign: 'center' }}>
           <Typography color="text.secondary">
-            No hay hallazgos registrados. Haz clic en "Generar Hallazgos" para
-            analizar las discrepancias detectadas.
+            No hay hallazgos registrados. Haz clic en "Generar Hallazgos con IA" para
+            analizar las discrepancias con Nova Premier.
           </Typography>
         </Paper>
-      ) : (
-        <TableContainer component={Paper}>
-          <Table size="small">
-            <TableHead>
-              <TableRow>
-                <TableCell>Factura / Discrepancia</TableCell>
-                <TableCell>Severidad</TableCell>
-                <TableCell>Explicación</TableCell>
-                <TableCell>Causa Probable</TableCell>
-                <TableCell>Recomendación</TableCell>
-                <TableCell>Fecha</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {findings.map((f) => (
-                <TableRow key={f.findingId}>
-                  <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
-                    {f.discrepancyId.slice(0, 8)}...
-                  </TableCell>
-                  <TableCell>
-                    <Chip
-                      label={f.severity}
-                      size="small"
-                      color={SEVERITY_COLORS[f.severity] ?? 'default'}
-                    />
-                  </TableCell>
-                  <TableCell sx={{ maxWidth: 250 }}>{f.explanation}</TableCell>
-                  <TableCell sx={{ maxWidth: 200 }}>{f.probableCause}</TableCell>
-                  <TableCell sx={{ maxWidth: 200 }}>{f.recommendation}</TableCell>
-                  <TableCell>{new Date(f.analyzedAt).toLocaleDateString()}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </TableContainer>
       )}
     </Box>
   );

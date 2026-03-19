@@ -1,4 +1,10 @@
 import { type ClientSchema, a, defineData } from '@aws-amplify/backend';
+import { defineFunction } from '@aws-amplify/backend';
+
+const findingsAnalyzerFn = defineFunction({
+  name: 'findings-analyzer',
+  entry: '../functions/findings-analyzer/handler.ts',
+});
 
 /**
  * Amplify Data configuration using DynamoDB via AppSync (GraphQL).
@@ -116,6 +122,19 @@ const schema = a.schema({
       executedAt: a.datetime().required(),
     })
     .identifier(['uploadId', 'ruleId'])
+    .authorization((allow) => [
+      allow.group('Administrator'),
+      allow.group('Operator'),
+    ]),
+
+  /** Custom query: invoke Bedrock Nova Premier to analyze discrepancies */
+  analyzeFindings: a
+    .query()
+    .arguments({
+      discrepancies: a.string().required(),
+    })
+    .returns(a.string())
+    .handler(a.handler.function(findingsAnalyzerFn))
     .authorization((allow) => [
       allow.group('Administrator'),
       allow.group('Operator'),
