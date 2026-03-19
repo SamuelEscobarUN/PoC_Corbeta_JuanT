@@ -27,7 +27,7 @@ import DashboardIcon from '@mui/icons-material/Dashboard';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import CompareArrowsIcon from '@mui/icons-material/CompareArrows';
 import FindInPageIcon from '@mui/icons-material/FindInPage';
-// import ChatIcon from '@mui/icons-material/Chat';
+import ChatIcon from '@mui/icons-material/Chat';
 import PeopleIcon from '@mui/icons-material/People';
 import RuleIcon from '@mui/icons-material/Rule';
 import BuildIcon from '@mui/icons-material/Build';
@@ -51,8 +51,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Carga de Archivos', path: '/uploads', icon: <UploadFileIcon /> },
   { label: 'Discrepancias', path: '/discrepancies', icon: <CompareArrowsIcon /> },
   { label: 'Hallazgos', path: '/findings', icon: <FindInPageIcon /> },
-  // TODO: Habilitar cuando se desarrolle el agente conversacional
-  // { label: 'Agente Conversacional', path: '/agent', icon: <ChatIcon /> },
+  { label: 'Agente Conversacional', path: '/agent', icon: <ChatIcon /> },
   { label: 'Gestión de Usuarios', path: '/admin/users', icon: <PeopleIcon />, roles: ['Administrator'] },
   { label: 'Reglas de Calidad', path: '/admin/quality-rules', icon: <RuleIcon />, roles: ['Administrator'] },
   { label: 'Remediación', path: '/remediation', icon: <BuildIcon /> },
