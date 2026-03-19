@@ -52,7 +52,7 @@ export class AIAnalysisService {
   private static instance: AIAnalysisService;
   private retryConfig: RetryConfig;
 
-  private constructor(retryConfig?: Partial<RetryConfig>) {
+  protected constructor(retryConfig?: Partial<RetryConfig>) {
     this.retryConfig = { ...DEFAULT_RETRY_CONFIG, ...retryConfig };
   }
 

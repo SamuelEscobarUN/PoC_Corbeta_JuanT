@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "name": "Deploy to AWS",
+  "description": "Commit all changes and push to GitHub, triggering Amplify Hosting auto-deploy to AWS with CloudFront.",
+  "version": "1",
+  "when": {
+    "type": "userTriggered"
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "git add -A && git commit -m \"deploy: update from Kiro\" && git push origin main"
+  }
+}

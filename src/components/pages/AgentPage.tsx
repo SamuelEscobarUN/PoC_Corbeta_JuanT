@@ -226,8 +226,8 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
         </Paper>
 
         {/* Datos estructurados del asistente */}
-        {!isUser && message.data && (
-          <StructuredData data={message.data} />
+        {!isUser && message.data != null && (
+          <StructuredData data={message.data as Record<string, unknown>} />
         )}
 
         <Typography
