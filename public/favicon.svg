@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Corbeta logo: three overlapping triangles -->
+  <!-- Blue large triangle (right) -->
+  <polygon points="32,8 62,56 42,56" fill="#1a237e"/>
+  <!-- Orange triangle (top) -->
+  <polygon points="28,6 42,32 22,32" fill="#ff6d00"/>
+  <!-- Teal/turquoise triangle (center) -->
+  <polygon points="22,28 36,52 14,52" fill="#00bfa5"/>
+</svg>
