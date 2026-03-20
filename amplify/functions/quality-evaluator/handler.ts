@@ -333,6 +333,34 @@ const UPLOAD_TABLE = process.env.UPLOAD_TABLE_NAME ?? '';
 const QUALITY_RESULT_TABLE = process.env.QUALITY_RESULT_TABLE_NAME ?? '';
 const BUCKET_NAME = process.env.BUCKET_NAME ?? '';
 
+// DynamoDB table name discovery: Amplify Gen 2 names tables as Model-AppSyncId-NONE
+// We use ListTables to find them at runtime if env vars are not set
+async function discoverTableName(modelPrefix: string, fallback: string): Promise<string> {
+  if (fallback) return fallback;
+  try {
+    const { DynamoDBClient: DDBClient, ListTablesCommand } = await import('@aws-sdk/client-dynamodb');
+    const client = new DDBClient({});
+    const result = await client.send(new ListTablesCommand({}));
+    const table = (result.TableNames ?? []).find((name) => name.startsWith(modelPrefix + '-'));
+    return table ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+let _resolvedTables: { qualityRule: string; upload: string; qualityResult: string } | null = null;
+
+async function getTableNames() {
+  if (_resolvedTables) return _resolvedTables;
+  const [qualityRule, upload, qualityResult] = await Promise.all([
+    discoverTableName('QualityRule', QUALITY_RULE_TABLE),
+    discoverTableName('Upload', UPLOAD_TABLE),
+    discoverTableName('QualityResult', QUALITY_RESULT_TABLE),
+  ]);
+  _resolvedTables = { qualityRule, upload, qualityResult };
+  return _resolvedTables;
+}
+
 // ─── DynamoDB helpers ────────────────────────────────────────────
 
 /**
@@ -340,9 +368,10 @@ const BUCKET_NAME = process.env.BUCKET_NAME ?? '';
  * Uses the stage-index GSI and filters by enabled=true.
  */
 async function getActiveRules(stage: string): Promise<QualityRuleRecord[]> {
+  const tables = await getTableNames();
   const result = await ddbClient.send(
     new QueryCommand({
-      TableName: QUALITY_RULE_TABLE,
+      TableName: tables.qualityRule,
       IndexName: 'stage-index',
       KeyConditionExpression: '#stage = :stage',
       FilterExpression: '#enabled = :enabled',
@@ -364,9 +393,10 @@ async function getActiveRules(stage: string): Promise<QualityRuleRecord[]> {
  * Fetches upload metadata from DynamoDB.
  */
 async function getUpload(uploadId: string): Promise<UploadRecord | null> {
+  const tables = await getTableNames();
   const result = await ddbClient.send(
     new GetCommand({
-      TableName: UPLOAD_TABLE,
+      TableName: tables.upload,
       Key: { uploadId },
     }),
   );
@@ -379,6 +409,7 @@ async function getUpload(uploadId: string): Promise<UploadRecord | null> {
  * Splits into chunks of 25 (DynamoDB limit).
  */
 async function persistResults(records: QualityResultRecord[]): Promise<void> {
+  const tables = await getTableNames();
   const BATCH_SIZE = 25;
 
   for (let i = 0; i < records.length; i += BATCH_SIZE) {
@@ -386,7 +417,7 @@ async function persistResults(records: QualityResultRecord[]): Promise<void> {
     await ddbClient.send(
       new BatchWriteCommand({
         RequestItems: {
-          [QUALITY_RESULT_TABLE]: batch.map((record) => ({
+          [tables.qualityResult]: batch.map((record) => ({
             PutRequest: {
               Item: {
                 uploadId: record.uploadId,
@@ -416,7 +447,7 @@ const GLUE_MAX_POLL_ATTEMPTS = 60; // ~3 minutes max
  */
 async function executeGlueDataQuality(
   s3Key: string,
-  dqdlRuleset: string,
+  _dqdlRuleset: string,
 ): Promise<GlueRuleResult[]> {
   // Start the evaluation run
   const startResponse = await glueClient.send(

@@ -54,27 +54,10 @@ backend.userManagementFn.resources.lambda.addToRolePolicy(
 );
 
 // ─── Quality Evaluator Lambda: permissions and environment ───────
-// Access DynamoDB tables via L2 CDK Table constructs (have tableName and tableArn)
-const qualityRuleTable = backend.data.resources.tables['QualityRule'];
-const uploadTable = backend.data.resources.tables['Upload'];
-const qualityResultTable = backend.data.resources.tables['QualityResult'];
-
 // S3 bucket for reading uploaded CSV files
 const uploadsBucket = backend.storage.resources.bucket;
 
-// Pass environment variables to the Lambda
-backend.qualityEvaluatorFn.addEnvironment(
-  'TABLE_NAME',
-  qualityRuleTable.tableName,
-);
-backend.qualityEvaluatorFn.addEnvironment(
-  'UPLOAD_TABLE_NAME',
-  uploadTable.tableName,
-);
-backend.qualityEvaluatorFn.addEnvironment(
-  'QUALITY_RESULT_TABLE_NAME',
-  qualityResultTable.tableName,
-);
+// Pass bucket name to the Lambda
 backend.qualityEvaluatorFn.addEnvironment(
   'BUCKET_NAME',
   uploadsBucket.bucketName,
@@ -102,7 +85,7 @@ backend.qualityEvaluatorFn.resources.lambda.addToRolePolicy(
   }),
 );
 
-// Grant DynamoDB read access for QualityRule and Upload tables
+// Grant DynamoDB access for QualityRule (read), Upload (read), QualityResult (write)
 backend.qualityEvaluatorFn.resources.lambda.addToRolePolicy(
   new PolicyStatement({
     effect: Effect.ALLOW,
@@ -110,24 +93,10 @@ backend.qualityEvaluatorFn.resources.lambda.addToRolePolicy(
       'dynamodb:GetItem',
       'dynamodb:Query',
       'dynamodb:Scan',
-    ],
-    resources: [
-      qualityRuleTable.tableArn,
-      `${qualityRuleTable.tableArn}/index/*`,
-      uploadTable.tableArn,
-      `${uploadTable.tableArn}/index/*`,
-    ],
-  }),
-);
-
-// Grant DynamoDB write access for QualityResult table
-backend.qualityEvaluatorFn.resources.lambda.addToRolePolicy(
-  new PolicyStatement({
-    effect: Effect.ALLOW,
-    actions: [
       'dynamodb:PutItem',
       'dynamodb:BatchWriteItem',
+      'dynamodb:ListTables',
     ],
-    resources: [qualityResultTable.tableArn],
+    resources: ['*'],
   }),
 );
