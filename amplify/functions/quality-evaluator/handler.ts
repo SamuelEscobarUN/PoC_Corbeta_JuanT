@@ -431,6 +431,7 @@ async function executeGlueDataQuality(
           },
         },
       },
+      Role: process.env.GLUE_ROLE_ARN ?? 'arn:aws:iam::role/GlueDataQualityRole',
       RulesetNames: ['inline-ruleset'],
       AdditionalRunOptions: {
         CloudWatchMetricsEnabled: false,
@@ -459,7 +460,7 @@ async function executeGlueDataQuality(
       break;
     }
 
-    if (status === 'FAILED' || status === 'STOPPED' || status === 'ERROR') {
+    if (status === 'FAILED' || status === 'STOPPED' || status === 'TIMEOUT') {
       const errorMsg = runStatus.ErrorString ?? `Glue DQ run ${status}`;
       throw new Error(`Glue Data Quality run failed: ${errorMsg}`);
     }

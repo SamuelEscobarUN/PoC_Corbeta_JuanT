@@ -21,9 +21,6 @@ export const backend = defineBackend({
   qualityEvaluatorFn,
 });
 
-// Grant Bedrock InvokeModel permission to the findings-analyzer Lambda
-// The function is defined inline in data/resource.ts as a custom query handler
-const dataStack = backend.data.resources.cfnResources;
 // Access the findings-analyzer function through the data resource
 const findingsAnalyzerLambda = backend.data.resources.functions['findings-analyzer'];
 if (findingsAnalyzerLambda) {
@@ -57,13 +54,10 @@ backend.userManagementFn.resources.lambda.addToRolePolicy(
 );
 
 // ─── Quality Evaluator Lambda: permissions and environment ───────
-// Access DynamoDB tables for QualityRule (read), Upload (read), and QualityResult (write)
-const qualityRuleTable =
-  backend.data.resources.cfnResources.amplifyDynamoDbTables['QualityRule'];
-const uploadTable =
-  backend.data.resources.cfnResources.amplifyDynamoDbTables['Upload'];
-const qualityResultTable =
-  backend.data.resources.cfnResources.amplifyDynamoDbTables['QualityResult'];
+// Access DynamoDB tables via L2 CDK Table constructs (have tableName and tableArn)
+const qualityRuleTable = backend.data.resources.tables['QualityRule'];
+const uploadTable = backend.data.resources.tables['Upload'];
+const qualityResultTable = backend.data.resources.tables['QualityResult'];
 
 // S3 bucket for reading uploaded CSV files
 const uploadsBucket = backend.storage.resources.bucket;
