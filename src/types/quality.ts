@@ -96,6 +96,8 @@ export interface QualityExecutionSummary {
   failed: number;
   /** Resultados individuales por regla. */
   results: QualityResultRecord[];
+  /** Alertas generadas por reglas fallidas. */
+  alerts: QualityAlert[];
   executedAt: string;
 }
 
@@ -113,4 +115,28 @@ export interface QualityAlert {
   message: string;
   details: QualityResultDetails;
   createdAt: string;
+}
+
+/** Resultado de la traducción de reglas a formato DQDL. */
+export interface DqdlTranslationResult {
+  /** Texto DQDL completo: Rules = [ ... ] */
+  ruleset: string;
+  /** Errores de traducción por regla. */
+  errors: DqdlError[];
+}
+
+/** Error de traducción de una regla individual a DQDL. */
+export interface DqdlError {
+  ruleId: string;
+  ruleName: string;
+  message: string;
+}
+
+/** Filtros para consulta de resultados de ejecución históricos. */
+export interface ResultFilters {
+  stage?: CascadeStage;
+  /** Fecha inicio en formato ISO. */
+  dateFrom?: string;
+  /** Fecha fin en formato ISO. */
+  dateTo?: string;
 }

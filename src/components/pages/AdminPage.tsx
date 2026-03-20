@@ -434,11 +434,33 @@ function SystemConfigTab() {
     autoProcessing: true,
   });
   const [saved, setSaved] = useState(false);
+  const [purging, setPurging] = useState(false);
+  const [purgeResult, setPurgeResult] = useState<string | null>(null);
 
   const handleSave = () => {
-    // Placeholder: en producción se guardaría en backend
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
+  };
+
+  const handlePurge = async () => {
+    if (!window.confirm('¿Estás seguro? Esto eliminará TODOS los datos de todas las tablas (uploads, sesiones, discrepancias, hallazgos, correcciones, reglas de calidad).')) {
+      return;
+    }
+    setPurging(true);
+    setPurgeResult(null);
+    try {
+      const service = DashboardService.getInstance();
+      const { deleted } = await service.purgeAllData();
+      const parts = Object.entries(deleted)
+        .filter(([, count]) => count > 0)
+        .map(([table, count]) => `${count} ${table}`);
+      setPurgeResult(parts.length > 0 ? `Eliminados: ${parts.join(', ')}` : 'No había datos para eliminar.');
+    } catch (err) {
+      console.error('Error al purgar datos:', err);
+      setPurgeResult('Error al eliminar datos. Revisa la consola.');
+    } finally {
+      setPurging(false);
+    }
   };
 
   return (
@@ -513,6 +535,33 @@ function SystemConfigTab() {
                 }
                 label="Procesamiento automático tras carga"
               />
+            </CardContent>
+          </Card>
+        </Grid>
+
+        <Grid size={{ xs: 12, md: 6 }}>
+          <Card sx={{ borderColor: 'error.main', borderWidth: 1, borderStyle: 'solid' }}>
+            <CardContent>
+              <Typography variant="subtitle1" gutterBottom color="error">
+                Zona de Peligro
+              </Typography>
+              <Typography variant="body2" color="text.secondary" gutterBottom>
+                Eliminar todos los datos de la plataforma: uploads, sesiones, discrepancias, hallazgos, correcciones y reglas de calidad.
+              </Typography>
+              {purgeResult && (
+                <Alert severity={purgeResult.startsWith('Error') ? 'error' : 'success'} sx={{ mb: 2 }}>
+                  {purgeResult}
+                </Alert>
+              )}
+              <Button
+                variant="outlined"
+                color="error"
+                onClick={handlePurge}
+                disabled={purging}
+                startIcon={purging ? <CircularProgress size={18} /> : <DeleteIcon />}
+              >
+                {purging ? 'Eliminando…' : 'Limpiar Todos los Datos'}
+              </Button>
             </CardContent>
           </Card>
         </Grid>

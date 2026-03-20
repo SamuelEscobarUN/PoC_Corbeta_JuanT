@@ -80,6 +80,7 @@ const sampleQualityPassed: QualityExecutionSummary = {
       executedAt: new Date().toISOString(),
     },
   ],
+  alerts: [],
   executedAt: new Date().toISOString(),
 };
 
@@ -109,6 +110,7 @@ const sampleQualityFailed: QualityExecutionSummary = {
       executedAt: new Date().toISOString(),
     },
   ],
+  alerts: [],
   executedAt: new Date().toISOString(),
 };
 

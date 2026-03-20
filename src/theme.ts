@@ -47,7 +47,15 @@ const theme = createTheme({
     },
   },
   typography: {
-    fontFamily: '"Roboto", "Helvetica", "Arial", sans-serif',
+    fontFamily: '"Inter", "Roboto", "Helvetica", "Arial", sans-serif',
+    h1: { fontWeight: 600 },
+    h2: { fontWeight: 600 },
+    h3: { fontWeight: 600 },
+    h4: { fontWeight: 600 },
+    h5: { fontWeight: 600 },
+    h6: { fontWeight: 600 },
+    body1: { fontWeight: 400, lineHeight: 1.6 },
+    body2: { fontWeight: 400, lineHeight: 1.6 },
   },
   shape: {
     borderRadius: 12,
@@ -58,6 +66,7 @@ const theme = createTheme({
         root: {
           textTransform: 'none',
           borderRadius: 20,
+          transition: 'all 200ms ease-in-out',
         },
       },
     },
@@ -65,6 +74,50 @@ const theme = createTheme({
       styleOverrides: {
         root: {
           borderRadius: 16,
+          transition: 'all 200ms ease-in-out',
+        },
+      },
+    },
+    MuiPaper: {
+      styleOverrides: {
+        root: {
+          borderRadius: 16,
+          transition: 'all 200ms ease-in-out',
+        },
+      },
+    },
+    MuiAppBar: {
+      styleOverrides: {
+        root: {
+          borderRadius: 0,
+        },
+      },
+    },
+    MuiDrawer: {
+      styleOverrides: {
+        paper: {
+          borderRadius: 0,
+        },
+      },
+    },
+    MuiTableContainer: {
+      styleOverrides: {
+        root: {
+          borderRadius: 12,
+        },
+      },
+    },
+    MuiChip: {
+      styleOverrides: {
+        root: {
+          borderRadius: 8,
+        },
+      },
+    },
+    MuiTableRow: {
+      styleOverrides: {
+        root: {
+          transition: 'all 200ms ease-in-out',
         },
       },
     },

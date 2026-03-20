@@ -28,6 +28,7 @@ export interface UploadResult {
 /** A persisted upload record as stored in DynamoDB. */
 export interface UploadRecord {
   uploadId: string;
+  sessionId?: string;
   stage: CascadeStage;
   fileName: string;
   fileSize: number;

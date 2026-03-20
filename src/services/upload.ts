@@ -55,10 +55,11 @@ export class UploadService {
    * Upload a CSV file to S3, register metadata in DynamoDB, register in
    * Glue Data Catalog, and transition the status to `processing`.
    *
-   * @param file     - The File object selected by the user.
-   * @param stage    - The cascade stage this file belongs to.
-   * @param content  - The raw text content of the CSV (pre-read by caller).
+   * @param file       - The File object selected by the user.
+   * @param stage      - The cascade stage this file belongs to.
+   * @param content    - The raw text content of the CSV (pre-read by caller).
    * @param uploadedBy - The userId of the uploader.
+   * @param sessionId  - Optional session ID to associate this upload with a work session.
    * @returns An {@link UploadResult} with the upload details.
    */
   async uploadFile(
@@ -66,6 +67,7 @@ export class UploadService {
     stage: CascadeStage,
     content: string,
     uploadedBy: string,
+    sessionId?: string,
   ): Promise<UploadResult> {
     // 1. Validate format before uploading
     const validation = this.validateFile(content, stage);
@@ -106,6 +108,7 @@ export class UploadService {
         s3Key,
         uploadedBy,
         uploadedAt: timestamp,
+        ...(sessionId && { sessionId }),
       });
 
       // 4. Register in Glue Data Catalog (catalogEntryId = uploadId for now)
@@ -197,6 +200,7 @@ export class UploadService {
       const items: UploadRecord[] = (response.data ?? []).map(
         (item) => ({
           uploadId: item.uploadId,
+          sessionId: item.sessionId ?? undefined,
           stage: item.stage as CascadeStage,
           fileName: item.fileName,
           fileSize: item.fileSize ?? 0,

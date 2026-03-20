@@ -40,6 +40,7 @@ import type { Schema } from '../../../amplify/data/resource';
 import { useAuth } from '../../hooks/useAuth';
 import { RemediationService } from '../../services/remediation';
 import { XmlGeneratorService } from '../../services/xml-generator';
+import { sessionService } from '../../services/session';
 import type { Correction, CorrectionStatus } from '../../types/remediation';
 
 const client = generateClient<Schema>();
@@ -90,6 +91,7 @@ export default function RemediationPage() {
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
   // Dialogs
   const [rejectOpen, setRejectOpen] = useState(false);
@@ -123,6 +125,21 @@ export default function RemediationPage() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  // Fetch the active session (most recent in_progress) on mount
+  useEffect(() => {
+    const fetchActiveSession = async () => {
+      try {
+        const result = await sessionService.listSessions({ status: 'in_progress' });
+        if (result.items.length > 0) {
+          setActiveSessionId(result.items[0].sessionId);
+        }
+      } catch (err) {
+        console.error('Error al obtener sesión activa:', err);
+      }
+    };
+    fetchActiveSession();
+  }, []);
+
   /** Genera correcciones automáticas para findings sin corrección existente. */
   const handleGenerateCorrections = useCallback(async () => {
     setGenerating(true);
@@ -147,6 +164,7 @@ export default function RemediationPage() {
           originStage: 'geopos_local',
           correctedValues: buildCorrectedValues(finding),
           proposedBy: user?.email ?? 'system',
+          ...(activeSessionId ? { sessionId: activeSessionId } : {}),
         });
         created++;
       }
@@ -157,7 +175,7 @@ export default function RemediationPage() {
     } finally {
       setGenerating(false);
     }
-  }, [findings, corrections, user, loadData]);
+  }, [findings, corrections, user, loadData, activeSessionId]);
 
   const handleApprove = async (correction: Correction) => {
     try {

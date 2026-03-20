@@ -25,6 +25,7 @@ import {
   MenuItem,
 } from '@mui/material';
 import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh';
+import DeleteSweepIcon from '@mui/icons-material/DeleteSweep';
 import SearchIcon from '@mui/icons-material/Search';
 import { generateClient } from 'aws-amplify/data';
 import type { Schema } from '../../../amplify/data/resource';
@@ -39,18 +40,6 @@ interface Finding {
   recommendation: string;
   severity: string;
   analyzedAt: string;
-}
-
-interface DiscrepancyRecord {
-  sessionId: string;
-  discrepancyId: string;
-  invoice: string;
-  type: string;
-  sourceStage: string;
-  targetStage: string;
-  expectedValue?: string | null;
-  actualValue?: string | null;
-  detectedAt: string;
 }
 
 const SEVERITY_COLORS: Record<string, 'error' | 'warning' | 'info' | 'default'> = {
@@ -107,9 +96,22 @@ export default function FindingsPage() {
     setProgress(0);
 
     try {
-      // 1. Load all discrepancies
+      // 1. Delete ALL existing findings first
+      setProgress(5);
+      const { data: oldFindings } = await client.models.Finding.list({ limit: 1000 });
+      if (oldFindings && oldFindings.length > 0) {
+        for (const f of oldFindings) {
+          await client.models.Finding.delete({
+            discrepancyId: f.discrepancyId,
+            findingId: f.findingId,
+          });
+        }
+      }
+      setFindings([]);
+
+      // 2. Load discrepancies — only from the most recent session
       const { data: discData } = await client.models.Discrepancy.list({ limit: 1000 });
-      const discrepancies: DiscrepancyRecord[] = (discData ?? []).map((d) => ({
+      const allDiscs = (discData ?? []).map((d) => ({
         sessionId: d.sessionId,
         discrepancyId: d.discrepancyId,
         invoice: d.invoice,
@@ -121,31 +123,27 @@ export default function FindingsPage() {
         detectedAt: d.detectedAt,
       }));
 
-      if (discrepancies.length === 0) {
+      if (allDiscs.length === 0) {
         setError('No hay discrepancias para analizar. Primero ejecuta una comparación.');
         return;
       }
 
-      // 2. Filter out discrepancies that already have findings
-      const { data: existingFindings } = await client.models.Finding.list({ limit: 1000 });
-      const existingDiscIds = new Set((existingFindings ?? []).map((f) => f.discrepancyId));
-      const newDiscrepancies = discrepancies.filter((d) => !existingDiscIds.has(d.discrepancyId));
+      // Find the most recent session
+      const latestSession = allDiscs.reduce((latest, d) =>
+        d.detectedAt > latest ? d.detectedAt : latest, '');
+      // Get all discrepancies from the latest session (same detectedAt date prefix)
+      const latestDatePrefix = latestSession.slice(0, 10); // YYYY-MM-DD
+      const discrepancies = allDiscs.filter((d) => d.detectedAt.startsWith(latestDatePrefix));
 
-      if (newDiscrepancies.length === 0) {
-        setSuccessMsg('Todos los hallazgos ya fueron generados previamente.');
-        await loadFindings();
-        return;
-      }
-
-      setProgress(10);
+      setProgress(15);
 
       // 3. Call Bedrock via custom query (batches of 20)
       const BATCH_SIZE = 20;
       let created = 0;
-      const totalBatches = Math.ceil(newDiscrepancies.length / BATCH_SIZE);
+      const totalBatches = Math.ceil(discrepancies.length / BATCH_SIZE);
 
-      for (let i = 0; i < newDiscrepancies.length; i += BATCH_SIZE) {
-        const batch = newDiscrepancies.slice(i, i + BATCH_SIZE);
+      for (let i = 0; i < discrepancies.length; i += BATCH_SIZE) {
+        const batch = discrepancies.slice(i, i + BATCH_SIZE);
         const batchNum = Math.floor(i / BATCH_SIZE) + 1;
 
         const payload = batch.map((d) => ({
@@ -190,11 +188,11 @@ export default function FindingsPage() {
           console.error(`Error en batch ${batchNum}:`, batchErr);
         }
 
-        setProgress(10 + Math.round((batchNum / totalBatches) * 85));
+        setProgress(15 + Math.round((batchNum / totalBatches) * 80));
       }
 
       setProgress(100);
-      setSuccessMsg(`Se generaron ${created} hallazgos con IA (Nova Premier).`);
+      setSuccessMsg(`Se generaron ${created} hallazgos con IA (Nova Premier) para ${discrepancies.length} discrepancias.`);
       await loadFindings();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al generar hallazgos');
@@ -202,6 +200,32 @@ export default function FindingsPage() {
       setGenerating(false);
     }
   }, [loadFindings]);
+
+  /** Clear all findings from DynamoDB */
+  const handleClear = useCallback(async () => {
+    setGenerating(true);
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      const { data: allFindings } = await client.models.Finding.list({ limit: 1000 });
+      if (allFindings && allFindings.length > 0) {
+        for (const f of allFindings) {
+          await client.models.Finding.delete({
+            discrepancyId: f.discrepancyId,
+            findingId: f.findingId,
+          });
+        }
+        setSuccessMsg(`Se eliminaron ${allFindings.length} hallazgos.`);
+      } else {
+        setSuccessMsg('No hay hallazgos para eliminar.');
+      }
+      setFindings([]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error al limpiar hallazgos');
+    } finally {
+      setGenerating(false);
+    }
+  }, []);
 
   // Filtered findings
   const filtered = findings.filter((f) => {
@@ -234,14 +258,25 @@ export default function FindingsPage() {
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           Genera hallazgos automáticos usando Amazon Bedrock (Nova Premier) a partir de las discrepancias detectadas.
         </Typography>
-        <Button
-          variant="contained"
-          startIcon={generating ? <CircularProgress size={20} color="inherit" /> : <AutoFixHighIcon />}
-          onClick={handleGenerate}
-          disabled={generating}
-        >
-          {generating ? 'Analizando con IA...' : 'Generar Hallazgos con IA'}
-        </Button>
+        <Box sx={{ display: 'flex', gap: 2 }}>
+          <Button
+            variant="contained"
+            startIcon={generating ? <CircularProgress size={20} color="inherit" /> : <AutoFixHighIcon />}
+            onClick={handleGenerate}
+            disabled={generating}
+          >
+            {generating ? 'Analizando con IA...' : 'Generar Hallazgos con IA'}
+          </Button>
+          <Button
+            variant="outlined"
+            color="error"
+            startIcon={<DeleteSweepIcon />}
+            onClick={handleClear}
+            disabled={generating || findings.length === 0}
+          >
+            Limpiar Hallazgos
+          </Button>
+        </Box>
         {generating && (
           <Box sx={{ mt: 2 }}>
             <LinearProgress variant="determinate" value={progress} />

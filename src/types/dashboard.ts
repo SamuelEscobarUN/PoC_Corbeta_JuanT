@@ -72,6 +72,15 @@ export interface RemediationStatus {
 }
 
 /** Datos consolidados del dashboard. */
+/** Resumen de plataforma (uploads y sesiones). */
+export interface PlatformSummary {
+  totalUploads: number;
+  totalSessions: number;
+  sessionsInProgress: number;
+  sessionsCompleted: number;
+  uploadsByStage: Record<string, number>;
+}
+
 export interface DashboardData {
   /** Resumen de reconciliación. */
   reconciliation: ReconciliationSummary;
@@ -81,4 +90,6 @@ export interface DashboardData {
   quality: QualityResultsSummary;
   /** Estado de remediación. */
   remediation: RemediationStatus;
+  /** Resumen de plataforma. */
+  platform: PlatformSummary;
 }

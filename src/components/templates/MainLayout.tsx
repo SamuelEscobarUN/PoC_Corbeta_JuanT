@@ -26,8 +26,7 @@ import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import CompareArrowsIcon from '@mui/icons-material/CompareArrows';
-import FindInPageIcon from '@mui/icons-material/FindInPage';
-import ChatIcon from '@mui/icons-material/Chat';
+import WorkHistoryIcon from '@mui/icons-material/WorkHistory';
 import PeopleIcon from '@mui/icons-material/People';
 import RuleIcon from '@mui/icons-material/Rule';
 import BuildIcon from '@mui/icons-material/Build';
@@ -50,11 +49,10 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Dashboard', path: '/dashboard', icon: <DashboardIcon /> },
   { label: 'Carga de Archivos', path: '/uploads', icon: <UploadFileIcon /> },
   { label: 'Discrepancias', path: '/discrepancies', icon: <CompareArrowsIcon /> },
-  { label: 'Hallazgos', path: '/findings', icon: <FindInPageIcon /> },
-  { label: 'Agente Conversacional', path: '/agent', icon: <ChatIcon /> },
+  { label: 'Remediación', path: '/remediation', icon: <BuildIcon /> },
+  { label: 'Sesiones', path: '/sessions', icon: <WorkHistoryIcon /> },
   { label: 'Gestión de Usuarios', path: '/admin/users', icon: <PeopleIcon />, roles: ['Administrator'] },
   { label: 'Reglas de Calidad', path: '/admin/quality-rules', icon: <RuleIcon />, roles: ['Administrator'] },
-  { label: 'Remediación', path: '/remediation', icon: <BuildIcon /> },
 ];
 
 function getVisibleItems(role: UserRole | null): NavItem[] {
@@ -173,6 +171,7 @@ export default function MainLayout() {
             transition: 'width 0.2s ease',
             overflowX: 'hidden',
             boxSizing: 'border-box',
+            paddingTop: '64px',
           },
         }}
         open

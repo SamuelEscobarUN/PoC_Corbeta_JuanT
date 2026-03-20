@@ -28,6 +28,7 @@ import VisibilityIcon from '@mui/icons-material/Visibility';
 import type { CascadeStage } from '../../types/csv';
 import type { UploadRecord, UploadStatus } from '../../types/upload';
 import { uploadService } from '../../services/upload';
+import { sessionService } from '../../services/session';
 import { STAGE_DISPLAY_NAMES } from './FileUploadForm';
 
 /** Color mapping for upload status chips. */
@@ -46,9 +47,11 @@ export interface UploadHistoryProps {
   refreshTrigger?: number;
   /** Called when user wants to preview a specific upload. */
   onPreview?: (record: UploadRecord) => void;
+  /** If provided, show only uploads for this session. */
+  sessionId?: string;
 }
 
-export default function UploadHistory({ refreshTrigger = 0, onPreview }: UploadHistoryProps) {
+export default function UploadHistory({ refreshTrigger = 0, onPreview, sessionId }: UploadHistoryProps) {
   const [records, setRecords] = useState<UploadRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [stageFilter, setStageFilter] = useState<CascadeStage | ''>('');
@@ -66,17 +69,25 @@ export default function UploadHistory({ refreshTrigger = 0, onPreview }: UploadH
       }
 
       try {
-        const result = await uploadService.getUploadHistory(
-          stageFilter ? { stage: stageFilter } : undefined,
-          token,
-        );
-
-        if (isLoadMore) {
-          setRecords((prev) => [...prev, ...result.items]);
+        if (sessionId) {
+          // Filter by session — no pagination needed
+          const items = await sessionService.getSessionUploads(sessionId);
+          const filtered = stageFilter ? items.filter((i) => i.stage === stageFilter) : items;
+          setRecords(filtered);
+          setNextToken(null);
         } else {
-          setRecords(result.items);
+          const result = await uploadService.getUploadHistory(
+            stageFilter ? { stage: stageFilter } : undefined,
+            token,
+          );
+
+          if (isLoadMore) {
+            setRecords((prev) => [...prev, ...result.items]);
+          } else {
+            setRecords(result.items);
+          }
+          setNextToken(result.nextToken ?? null);
         }
-        setNextToken(result.nextToken ?? null);
       } catch {
         // Silently handle — records stay empty
       } finally {
@@ -84,7 +95,7 @@ export default function UploadHistory({ refreshTrigger = 0, onPreview }: UploadH
         setLoadingMore(false);
       }
     },
-    [stageFilter],
+    [stageFilter, sessionId],
   );
 
   useEffect(() => {
@@ -118,7 +129,9 @@ export default function UploadHistory({ refreshTrigger = 0, onPreview }: UploadH
   return (
     <Paper sx={{ p: 3 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 2 }}>
-        <Typography variant="h6">Historial de Cargas</Typography>
+        <Typography variant="h6">
+          {sessionId ? 'Archivos de la Sesión' : 'Historial de Cargas'}
+        </Typography>
 
         <FormControl size="small" sx={{ minWidth: 200 }}>
           <InputLabel id="history-stage-filter-label">Filtrar por etapa</InputLabel>

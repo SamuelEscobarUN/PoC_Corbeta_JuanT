@@ -18,6 +18,13 @@ import {
   Alert,
   Button,
   TextField,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import FileUploadForm from '../organisms/FileUploadForm';
@@ -25,13 +32,24 @@ import UploadHistory from '../organisms/UploadHistory';
 import type { UploadRecord } from '../../types/upload';
 import type { CascadeStage } from '../../types/csv';
 import { uploadService } from '../../services/upload';
+import { sessionService } from '../../services/session';
+import type { Session } from '../../types/session';
+import { useAuth } from '../../hooks/useAuth';
 import { parseCSV, parseMonetaryValue } from '../../services/csv-validator';
 import { STAGE_DISPLAY_NAMES } from '../organisms/FileUploadForm';
 
 export default function UploadPage() {
+  const { user } = useAuth();
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [tabIndex, setTabIndex] = useState(0);
   const [selectedRecord, setSelectedRecord] = useState<UploadRecord | null>(null);
+
+  // Session state
+  const [sessionMode, setSessionMode] = useState<'none' | 'new' | 'existing'>('none');
+  const [newSessionName, setNewSessionName] = useState('');
+  const [selectedSessionId, setSelectedSessionId] = useState<string>('');
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<Session[]>([]);
 
   // Preview state
   const [rawData, setRawData] = useState<Record<string, string>[]>([]);
@@ -43,6 +61,42 @@ export default function UploadPage() {
   const handlePreview = (record: UploadRecord) => {
     setSelectedRecord(record);
     setTabIndex(1);
+  };
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { items } = await sessionService.listSessions({ status: 'in_progress' });
+        setSessions(items);
+      } catch {
+        // Silently fail — session selector is optional
+      }
+    })();
+  }, []);
+
+  /**
+   * Called by FileUploadForm just before uploading.
+   * If the user chose "new session" and hasn't created it yet, create it now.
+   * Returns the sessionId to associate with the upload.
+   */
+  const handleBeforeUpload = async (): Promise<string | undefined> => {
+    if (sessionMode === 'none') return undefined;
+
+    if (sessionMode === 'existing') return selectedSessionId || undefined;
+
+    // sessionMode === 'new'
+    if (activeSessionId) return activeSessionId; // already created on a previous upload
+
+    if (!newSessionName.trim()) return undefined;
+
+    const session = await sessionService.createSession({
+      sessionName: newSessionName.trim(),
+      uploadIds: [],
+      createdBy: user?.email ?? 'unknown',
+    });
+    setActiveSessionId(session.sessionId);
+    setSessions((prev) => [session, ...prev]);
+    return session.sessionId;
   };
 
   useEffect(() => {
@@ -234,8 +288,63 @@ export default function UploadPage() {
 
       {tabIndex === 0 && (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-          <FileUploadForm onUploadComplete={() => setRefreshTrigger((n) => n + 1)} />
-          <UploadHistory refreshTrigger={refreshTrigger} onPreview={handlePreview} />
+          <Paper sx={{ p: 2 }}>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>Sesión de trabajo</Typography>
+            <RadioGroup
+              row
+              value={sessionMode}
+              onChange={(e) => {
+                const mode = e.target.value as 'none' | 'new' | 'existing';
+                setSessionMode(mode);
+                if (mode !== 'new') { setNewSessionName(''); setActiveSessionId(null); }
+                if (mode !== 'existing') setSelectedSessionId('');
+              }}
+            >
+              <FormControlLabel value="none" control={<Radio size="small" />} label="Sin sesión" />
+              <FormControlLabel value="new" control={<Radio size="small" />} label="Nueva sesión" />
+              <FormControlLabel value="existing" control={<Radio size="small" />} label="Sesión existente" />
+            </RadioGroup>
+            {sessionMode === 'new' && (
+              <TextField
+                size="small"
+                fullWidth
+                label="Nombre de la nueva sesión"
+                placeholder="Ej: Reconciliación Enero 2025"
+                value={newSessionName}
+                onChange={(e) => setNewSessionName(e.target.value)}
+                disabled={!!activeSessionId}
+                helperText={activeSessionId ? 'Sesión creada — los archivos se asociarán a esta sesión' : 'La sesión se creará al subir el primer archivo'}
+                sx={{ mt: 1 }}
+              />
+            )}
+            {sessionMode === 'existing' && (
+              <FormControl fullWidth size="small" sx={{ mt: 1 }}>
+                <InputLabel id="session-select-label">Sesión</InputLabel>
+                <Select
+                  labelId="session-select-label"
+                  value={selectedSessionId}
+                  label="Sesión"
+                  onChange={(e) => setSelectedSessionId(e.target.value)}
+                >
+                  <MenuItem value="">— Seleccionar —</MenuItem>
+                  {sessions.map((s) => (
+                    <MenuItem key={s.sessionId} value={s.sessionId}>
+                      {s.sessionName} ({new Date(s.createdAt).toLocaleDateString('es-CO')})
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            )}
+          </Paper>
+          <FileUploadForm
+            onBeforeUpload={handleBeforeUpload}
+            onUploadComplete={() => setRefreshTrigger((n) => n + 1)}
+          />
+          <UploadHistory
+            refreshTrigger={refreshTrigger}
+            onPreview={handlePreview}
+            sessionId={activeSessionId || selectedSessionId || undefined}
+          />
         </Box>
       )}
 

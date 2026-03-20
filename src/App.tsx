@@ -7,11 +7,12 @@ import MainLayout from './components/templates/MainLayout';
 import UploadPage from './components/pages/UploadPage';
 import QualityRulesPage from './components/pages/QualityRulesPage';
 import DashboardPage from './components/pages/DashboardPage';
-import AgentPage from './components/pages/AgentPage';
 import RemediationPage from './components/pages/RemediationPage';
 import AdminPage from './components/pages/AdminPage';
 import DiscrepanciesPage from './components/pages/DiscrepanciesPage';
-import FindingsPage from './components/pages/FindingsPage';
+import SessionsPage from './components/pages/SessionsPage';
+import SessionDetailPage from './components/pages/SessionDetailPage';
+
 
 function App() {
   return (
@@ -28,8 +29,9 @@ function App() {
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/uploads" element={<UploadPage />} />
               <Route path="/discrepancies" element={<DiscrepanciesPage />} />
-              <Route path="/findings" element={<FindingsPage />} />
-              <Route path="/agent" element={<AgentPage />} />
+              <Route path="/findings" element={<Navigate to="/discrepancies" replace />} />
+              <Route path="/sessions" element={<SessionsPage />} />
+              <Route path="/sessions/:id" element={<SessionDetailPage />} />
               <Route path="/remediation" element={<RemediationPage />} />
 
               {/* Admin-only routes */}

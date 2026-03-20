@@ -1,10 +1,10 @@
 /**
  * QualityRulesService — gestiona reglas de calidad de datos y ejecuta
- * validaciones sobre los datos cargados por etapa de la cascada.
+ * validaciones delegando al backend (Lambda + Glue Data Quality).
  *
- * Integra con AWS Glue Data Quality (placeholder) para ejecutar reglas
- * configuradas, registra resultados en la tabla QualityResults de DynamoDB
- * y genera alertas vía SNS cuando una regla falla.
+ * CRUD opera contra DynamoDB vía Amplify Data (client.models.QualityRule).
+ * La ejecución de reglas se delega a la custom query AppSync
+ * `executeQualityRules` que invoca la Lambda quality-evaluator.
  *
  * Usa Amplify Data (generateClient) para operaciones DynamoDB.
  */
@@ -15,14 +15,13 @@ import type { Schema } from '../../amplify/data/resource';
 import type { CascadeStage } from '../types/csv';
 import type {
   QualityRule,
+  QualityRuleType,
   CreateQualityRuleInput,
   UpdateQualityRuleInput,
-  QualityResultRecord,
-  QualityResultDetails,
   QualityExecutionSummary,
-  QualityAlert,
-  AlertSeverity,
+  ResultFilters,
 } from '../types/quality';
+import { validateDqdlExpression, generateBaseExpression } from './dqdl-translator';
 
 /** Cliente Amplify Data tipado con nuestro esquema. */
 const client = generateClient<Schema>();
@@ -32,12 +31,6 @@ export class QualityRulesService {
   /*  Singleton                                                         */
   /* ------------------------------------------------------------------ */
   private static instance: QualityRulesService;
-
-  /**
-   * Almacén en memoria de reglas de calidad.
-   * En producción se persistirían en DynamoDB o Glue Data Catalog.
-   */
-  private rulesStore: Map<string, QualityRule> = new Map();
 
   private constructor() {}
 
@@ -54,15 +47,17 @@ export class QualityRulesService {
   }
 
   /* ------------------------------------------------------------------ */
-  /*  CRUD de reglas de calidad                                         */
+  /*  CRUD de reglas de calidad (DynamoDB)                              */
   /* ------------------------------------------------------------------ */
 
   /**
-   * Crear una nueva regla de calidad para una etapa.
+   * Crear una nueva regla de calidad y persistirla en DynamoDB.
    */
-  createRule(input: CreateQualityRuleInput): QualityRule {
+  async createRule(input: CreateQualityRuleInput): Promise<QualityRule> {
     const ruleId = crypto.randomUUID();
-    const rule: QualityRule = {
+    const now = new Date().toISOString();
+
+    const record = {
       ruleId,
       ruleName: input.ruleName,
       stage: input.stage,
@@ -71,21 +66,44 @@ export class QualityRulesService {
       targetColumn: input.targetColumn,
       threshold: input.threshold ?? 1.0,
       enabled: input.enabled ?? true,
-      createdAt: new Date().toISOString(),
+      createdAt: now,
     };
-    this.rulesStore.set(ruleId, rule);
-    return rule;
+
+    await client.models.QualityRule.create(record);
+
+    return {
+      ruleId,
+      ruleName: input.ruleName,
+      stage: input.stage,
+      type: input.type as QualityRuleType,
+      expression: input.expression,
+      targetColumn: input.targetColumn,
+      threshold: input.threshold ?? 1.0,
+      enabled: input.enabled ?? true,
+      createdAt: now,
+    };
   }
 
   /**
-   * Actualizar una regla existente.
+   * Actualizar una regla existente en DynamoDB.
    * Retorna la regla actualizada o null si no existe.
    */
-  updateRule(ruleId: string, input: UpdateQualityRuleInput): QualityRule | null {
-    const existing = this.rulesStore.get(ruleId);
+  async updateRule(ruleId: string, input: UpdateQualityRuleInput): Promise<QualityRule | null> {
+    const existing = await this.getRule(ruleId);
     if (!existing) return null;
 
-    const updated: QualityRule = {
+    const updateData: Record<string, unknown> = { ruleId };
+    if (input.ruleName !== undefined) updateData.ruleName = input.ruleName;
+    if (input.expression !== undefined) updateData.expression = input.expression;
+    if (input.targetColumn !== undefined) updateData.targetColumn = input.targetColumn;
+    if (input.threshold !== undefined) updateData.threshold = input.threshold;
+    if (input.enabled !== undefined) updateData.enabled = input.enabled;
+
+    await client.models.QualityRule.update(
+      updateData as Parameters<typeof client.models.QualityRule.update>[0],
+    );
+
+    return {
       ...existing,
       ...(input.ruleName !== undefined && { ruleName: input.ruleName }),
       ...(input.expression !== undefined && { expression: input.expression }),
@@ -93,298 +111,221 @@ export class QualityRulesService {
       ...(input.threshold !== undefined && { threshold: input.threshold }),
       ...(input.enabled !== undefined && { enabled: input.enabled }),
     };
-    this.rulesStore.set(ruleId, updated);
-    return updated;
   }
 
   /**
-   * Eliminar una regla por su ID.
+   * Eliminar una regla por su ID de DynamoDB.
    * Retorna true si se eliminó, false si no existía.
    */
-  deleteRule(ruleId: string): boolean {
-    return this.rulesStore.delete(ruleId);
+  async deleteRule(ruleId: string): Promise<boolean> {
+    try {
+      const existing = await this.getRule(ruleId);
+      if (!existing) return false;
+
+      await client.models.QualityRule.delete({ ruleId });
+      return true;
+    } catch (error) {
+      console.error(`Error al eliminar regla ${ruleId}:`, error);
+      return false;
+    }
   }
 
   /**
-   * Listar reglas de calidad filtradas por etapa.
-   * Si no se especifica etapa, retorna todas las reglas.
+   * Listar reglas de calidad desde DynamoDB, opcionalmente filtradas por etapa.
+   * Si se especifica etapa, usa el GSI stage-index.
    */
-  listRules(stage?: CascadeStage): QualityRule[] {
-    const all = Array.from(this.rulesStore.values());
-    if (!stage) return all;
-    return all.filter((r) => r.stage === stage);
+  async listRules(stage?: CascadeStage): Promise<QualityRule[]> {
+    try {
+      if (stage) {
+        const response = await client.models.QualityRule.listQualityRuleByStageAndCreatedAt(
+          { stage },
+          { sortDirection: 'ASC' },
+        );
+        return (response.data ?? []).map((item) =>
+          this.mapDynamoToRule(item as unknown as Record<string, unknown>),
+        );
+      }
+
+      const response = await client.models.QualityRule.list();
+      return (response.data ?? []).map((item) =>
+        this.mapDynamoToRule(item as unknown as Record<string, unknown>),
+      );
+    } catch (error) {
+      console.error('Error al listar reglas:', error);
+      return [];
+    }
   }
 
   /**
-   * Obtener una regla por su ID.
+   * Obtener una regla por su ID desde DynamoDB.
    */
-  getRule(ruleId: string): QualityRule | null {
-    return this.rulesStore.get(ruleId) ?? null;
+  async getRule(ruleId: string): Promise<QualityRule | null> {
+    try {
+      const { data } = await client.models.QualityRule.get({ ruleId });
+      if (!data) return null;
+      return this.mapDynamoToRule(data as unknown as Record<string, unknown>);
+    } catch (error) {
+      console.error(`Error al obtener regla ${ruleId}:`, error);
+      return null;
+    }
   }
 
   /* ------------------------------------------------------------------ */
-  /*  Ejecución de reglas                                               */
+  /*  Ejecución de reglas (delegada al backend)                        */
   /* ------------------------------------------------------------------ */
 
   /**
-   * Ejecutar todas las reglas activas configuradas para la etapa dada
-   * contra los datos proporcionados.
-   *
-   * - Evalúa cada regla contra los datos usando el motor de evaluación.
-   * - Registra cada resultado (passed/failed) en DynamoDB QualityResults.
-   * - Genera alertas para las reglas que fallan.
-   * - Retorna un resumen con conteos de passed/failed.
+   * Ejecutar reglas de calidad para un upload invocando la Lambda
+   * quality-evaluator a través de la custom query AppSync.
    *
    * @param uploadId - ID del upload asociado.
    * @param stage    - Etapa de la cascada.
-   * @param data     - Datos a validar (arreglo de registros clave-valor).
    */
   async executeRules(
     uploadId: string,
     stage: CascadeStage,
-    data: Record<string, string>[],
   ): Promise<QualityExecutionSummary> {
-    const rules = this.listRules(stage).filter((r) => r.enabled);
-    const now = new Date().toISOString();
-    const results: QualityResultRecord[] = [];
-    const alerts: QualityAlert[] = [];
-
-    for (const rule of rules) {
-      // Evaluar la regla contra los datos
-      const details = this.evaluateRule(rule, data);
-      const passed = details.compliancePercent / 100 >= rule.threshold;
-      const result: QualityResultRecord = {
-        uploadId,
-        ruleId: rule.ruleId,
-        ruleName: rule.ruleName,
-        ruleExpression: rule.expression,
-        result: passed ? 'passed' : 'failed',
-        details,
-        executedAt: now,
-      };
-
-      results.push(result);
-
-      // Registrar resultado en DynamoDB
-      await this.saveResultToDynamo(result);
-
-      // Generar alerta si la regla falló
-      if (!passed) {
-        const alert = this.createAlert(uploadId, rule, stage, details, now);
-        alerts.push(alert);
-        await this.publishAlert(alert);
-      }
-    }
-
-    return {
+    const { data, errors } = await client.queries.executeQualityRules({
       uploadId,
       stage,
-      totalRules: rules.length,
-      passed: results.filter((r) => r.result === 'passed').length,
-      failed: results.filter((r) => r.result === 'failed').length,
-      results,
-      executedAt: now,
-    };
+    });
+
+    if (errors && errors.length > 0) {
+      throw new Error(errors.map((e) => e.message).join('; '));
+    }
+
+    if (!data) {
+      throw new Error('No se recibió respuesta de la ejecución de reglas');
+    }
+
+    const parsed: QualityExecutionSummary = JSON.parse(data);
+    return parsed;
   }
 
   /* ------------------------------------------------------------------ */
-  /*  Motor de evaluación de reglas                                     */
+  /*  Validación DQDL                                                  */
   /* ------------------------------------------------------------------ */
 
   /**
-   * Evaluar una regla contra un conjunto de datos.
-   * Delega al evaluador correspondiente según el tipo de regla.
-   *
-   * En producción, esto se integraría con AWS Glue Data Quality.
-   * Aquí implementamos evaluación local para los tipos básicos.
+   * Validar una expresión DQDL usando el traductor local.
+   * Para tipos con expresión base (completeness, uniqueness, range, format),
+   * genera la expresión base si se proporciona una columna.
    */
-  evaluateRule(rule: QualityRule, data: Record<string, string>[]): QualityResultDetails {
-    const totalRecords = data.length;
-
-    if (totalRecords === 0) {
-      return {
-        recordsEvaluated: 0,
-        recordsPassed: 0,
-        recordsFailed: 0,
-        compliancePercent: 0,
-        message: 'No hay registros para evaluar',
-      };
+  validateExpression(
+    expression: string,
+    type: QualityRuleType,
+  ): { valid: boolean; error?: string } {
+    if (type === 'custom') {
+      return validateDqdlExpression(expression);
     }
 
-    switch (rule.type) {
-      case 'completeness':
-        return this.evaluateCompleteness(rule, data);
-      case 'uniqueness':
-        return this.evaluateUniqueness(rule, data);
-      case 'range':
-        return this.evaluateRange(rule, data);
-      case 'format':
-        return this.evaluateFormat(rule, data);
-      default:
-        // Para tipos no implementados localmente (referential, custom),
-        // se delegaría a Glue Data Quality.
-        return this.evaluateCustom(rule, data);
-    }
+    // Para tipos estándar, validar la expresión DQDL directamente
+    return validateDqdlExpression(expression);
+  }
+
+  /**
+   * Generar una expresión DQDL base para un tipo de regla y columna.
+   */
+  generateBaseExpression(type: QualityRuleType, column: string): string {
+    return generateBaseExpression(type, column);
   }
 
   /* ------------------------------------------------------------------ */
-  /*  Evaluadores por tipo de regla                                     */
+  /*  Consulta de resultados históricos                                */
   /* ------------------------------------------------------------------ */
 
   /**
-   * Completeness: verifica que la columna objetivo no tenga valores nulos o vacíos.
+   * Consultar resultados de ejecución históricos desde DynamoDB.
+   * Soporta filtros por etapa y rango de fechas.
+   * Retorna resultados ordenados por fecha descendente.
    */
-  private evaluateCompleteness(
-    rule: QualityRule,
-    data: Record<string, string>[],
-  ): QualityResultDetails {
-    const column = rule.targetColumn;
-    if (!column) {
-      return this.buildDetails(data.length, 0, 'No se especificó columna objetivo');
-    }
-
-    let passed = 0;
-    for (const row of data) {
-      const value = row[column];
-      if (value !== undefined && value !== null && value.trim() !== '') {
-        passed++;
-      }
-    }
-
-    const failed = data.length - passed;
-    return this.buildDetails(
-      data.length,
-      passed,
-      failed > 0
-        ? `${failed} registros con valores vacíos en columna "${column}"`
-        : `Todos los registros tienen valores en columna "${column}"`,
-    );
-  }
-
-  /**
-   * Uniqueness: verifica que los valores de la columna objetivo sean únicos.
-   */
-  private evaluateUniqueness(
-    rule: QualityRule,
-    data: Record<string, string>[],
-  ): QualityResultDetails {
-    const column = rule.targetColumn;
-    if (!column) {
-      return this.buildDetails(data.length, 0, 'No se especificó columna objetivo');
-    }
-
-    const seen = new Map<string, number>();
-    for (const row of data) {
-      const value = row[column] ?? '';
-      seen.set(value, (seen.get(value) ?? 0) + 1);
-    }
-
-    // Registros con valores duplicados se consideran fallidos
-    let duplicateCount = 0;
-    for (const count of seen.values()) {
-      if (count > 1) duplicateCount += count;
-    }
-
-    const passed = data.length - duplicateCount;
-    return this.buildDetails(
-      data.length,
-      passed,
-      duplicateCount > 0
-        ? `${duplicateCount} registros con valores duplicados en columna "${column}"`
-        : `Todos los valores son únicos en columna "${column}"`,
-    );
-  }
-
-  /**
-   * Range: verifica que los valores numéricos estén dentro del rango
-   * especificado en la expresión (formato: "min,max").
-   */
-  private evaluateRange(
-    rule: QualityRule,
-    data: Record<string, string>[],
-  ): QualityResultDetails {
-    const column = rule.targetColumn;
-    if (!column) {
-      return this.buildDetails(data.length, 0, 'No se especificó columna objetivo');
-    }
-
-    // Parsear rango de la expresión (formato: "min,max")
-    const parts = rule.expression.split(',').map((s) => s.trim());
-    const min = parseFloat(parts[0]);
-    const max = parseFloat(parts[1]);
-
-    if (isNaN(min) || isNaN(max)) {
-      return this.buildDetails(data.length, 0, 'Expresión de rango inválida (formato: "min,max")');
-    }
-
-    let passed = 0;
-    for (const row of data) {
-      const value = parseFloat(row[column]);
-      if (!isNaN(value) && value >= min && value <= max) {
-        passed++;
-      }
-    }
-
-    const failed = data.length - passed;
-    return this.buildDetails(
-      data.length,
-      passed,
-      failed > 0
-        ? `${failed} registros fuera del rango [${min}, ${max}] en columna "${column}"`
-        : `Todos los valores están en el rango [${min}, ${max}] en columna "${column}"`,
-    );
-  }
-
-  /**
-   * Format: verifica que los valores coincidan con la expresión regular.
-   */
-  private evaluateFormat(
-    rule: QualityRule,
-    data: Record<string, string>[],
-  ): QualityResultDetails {
-    const column = rule.targetColumn;
-    if (!column) {
-      return this.buildDetails(data.length, 0, 'No se especificó columna objetivo');
-    }
-
-    let regex: RegExp;
+  async getExecutionResults(
+    filters?: ResultFilters,
+  ): Promise<QualityExecutionSummary[]> {
     try {
-      regex = new RegExp(rule.expression);
-    } catch {
-      return this.buildDetails(data.length, 0, `Expresión regular inválida: "${rule.expression}"`);
-    }
+      const response = await client.models.QualityResult.list();
+      const rawResults = (response.data ?? []) as unknown as Array<Record<string, unknown>>;
 
-    let passed = 0;
-    for (const row of data) {
-      const value = row[column] ?? '';
-      if (regex.test(value)) {
-        passed++;
+      // Agrupar resultados por uploadId para construir summaries
+      const grouped = new Map<string, Array<Record<string, unknown>>>();
+      for (const result of rawResults) {
+        const uploadId = result.uploadId as string;
+        if (!grouped.has(uploadId)) {
+          grouped.set(uploadId, []);
+        }
+        grouped.get(uploadId)!.push(result);
       }
+
+      let summaries: QualityExecutionSummary[] = [];
+
+      for (const [uploadId, results] of grouped) {
+        const resultRecords = results.map((r) => {
+          const details = typeof r.details === 'string'
+            ? JSON.parse(r.details)
+            : r.details ?? {};
+
+          return {
+            uploadId: r.uploadId as string,
+            ruleId: r.ruleId as string,
+            ruleName: (r.ruleName as string) ?? '',
+            ruleExpression: (r.ruleExpression as string) ?? '',
+            result: (r.result as 'passed' | 'failed') ?? 'failed',
+            details: {
+              recordsEvaluated: details.recordsEvaluated ?? 0,
+              recordsPassed: details.recordsPassed ?? 0,
+              recordsFailed: details.recordsFailed ?? 0,
+              compliancePercent: details.compliancePercent ?? 0,
+              message: details.message ?? '',
+            },
+            executedAt: (r.executedAt as string) ?? '',
+          };
+        });
+
+        const passed = resultRecords.filter((r) => r.result === 'passed').length;
+        const failed = resultRecords.filter((r) => r.result === 'failed').length;
+
+        // Determine stage from the upload context or first result
+        const executedAt = resultRecords.length > 0
+          ? resultRecords.reduce((latest, r) =>
+              r.executedAt > latest ? r.executedAt : latest, resultRecords[0].executedAt)
+          : '';
+
+        summaries.push({
+          uploadId,
+          stage: '' as CascadeStage, // Will be enriched if stage filter is applied
+          totalRules: resultRecords.length,
+          passed,
+          failed,
+          results: resultRecords,
+          alerts: [],
+          executedAt,
+        });
+      }
+
+      // Apply filters
+      if (filters?.stage) {
+        summaries = summaries.filter((s) =>
+          s.stage === filters.stage ||
+          s.results.some((r) => r.ruleExpression.includes(filters.stage!)),
+        );
+      }
+
+      if (filters?.dateFrom) {
+        summaries = summaries.filter((s) => s.executedAt >= filters.dateFrom!);
+      }
+
+      if (filters?.dateTo) {
+        summaries = summaries.filter((s) => s.executedAt <= filters.dateTo!);
+      }
+
+      // Sort by executedAt descending (most recent first)
+      summaries.sort((a, b) => b.executedAt.localeCompare(a.executedAt));
+
+      return summaries;
+    } catch (error) {
+      console.error('Error al consultar resultados históricos:', error);
+      return [];
     }
-
-    const failed = data.length - passed;
-    return this.buildDetails(
-      data.length,
-      passed,
-      failed > 0
-        ? `${failed} registros no coinciden con el formato en columna "${column}"`
-        : `Todos los registros coinciden con el formato en columna "${column}"`,
-    );
-  }
-
-  /**
-   * Custom/Referential: evaluación placeholder.
-   * En producción se delegaría a AWS Glue Data Quality.
-   */
-  private evaluateCustom(
-    rule: QualityRule,
-    data: Record<string, string>[],
-  ): QualityResultDetails {
-    return this.buildDetails(
-      data.length,
-      data.length,
-      `Regla "${rule.ruleName}" evaluada vía Glue Data Quality (placeholder)`,
-    );
   }
 
   /* ------------------------------------------------------------------ */
@@ -392,97 +333,21 @@ export class QualityRulesService {
   /* ------------------------------------------------------------------ */
 
   /**
-   * Construir objeto de detalles de resultado.
+   * Mapear registro de DynamoDB a interfaz QualityRule.
    */
-  private buildDetails(
-    total: number,
-    passed: number,
-    message: string,
-  ): QualityResultDetails {
-    const failed = total - passed;
-    const compliancePercent = total > 0 ? (passed / total) * 100 : 0;
+  private mapDynamoToRule(item: Record<string, unknown>): QualityRule {
     return {
-      recordsEvaluated: total,
-      recordsPassed: passed,
-      recordsFailed: failed,
-      compliancePercent,
-      message,
+      ruleId: item.ruleId as string,
+      ruleName: item.ruleName as string,
+      stage: item.stage as CascadeStage,
+      type: item.type as QualityRuleType,
+      expression: item.expression as string,
+      targetColumn: item.targetColumn as string | undefined,
+      threshold: (item.threshold as number) ?? 1.0,
+      enabled: (item.enabled as boolean) ?? true,
+      createdAt: item.createdAt as string,
+      updatedBy: item.updatedBy as string | undefined,
     };
-  }
-
-  /**
-   * Persistir resultado de regla en DynamoDB (tabla QualityResults).
-   */
-  private async saveResultToDynamo(result: QualityResultRecord): Promise<void> {
-    try {
-      await client.models.QualityResult.create({
-        uploadId: result.uploadId,
-        ruleId: result.ruleId,
-        ruleName: result.ruleName,
-        ruleExpression: result.ruleExpression,
-        result: result.result,
-        details: JSON.stringify(result.details),
-        executedAt: result.executedAt,
-      });
-    } catch (error) {
-      // Registrar error pero no interrumpir la ejecución
-      console.error(
-        `Error al guardar resultado de regla ${result.ruleId}:`,
-        error,
-      );
-    }
-  }
-
-  /**
-   * Crear objeto de alerta a partir de una regla fallida.
-   */
-  private createAlert(
-    uploadId: string,
-    rule: QualityRule,
-    stage: CascadeStage,
-    details: QualityResultDetails,
-    timestamp: string,
-  ): QualityAlert {
-    // Determinar severidad según el porcentaje de cumplimiento
-    const severity = this.determineSeverity(details.compliancePercent);
-
-    return {
-      alertId: crypto.randomUUID(),
-      uploadId,
-      ruleId: rule.ruleId,
-      ruleName: rule.ruleName,
-      stage,
-      severity,
-      message: `Regla "${rule.ruleName}" falló: ${details.message}`,
-      details,
-      createdAt: timestamp,
-    };
-  }
-
-  /**
-   * Determinar severidad de la alerta según el porcentaje de cumplimiento.
-   */
-  private determineSeverity(compliancePercent: number): AlertSeverity {
-    if (compliancePercent < 25) return 'critical';
-    if (compliancePercent < 50) return 'high';
-    if (compliancePercent < 75) return 'medium';
-    return 'low';
-  }
-
-  /**
-   * Publicar alerta vía SNS (placeholder).
-   * En producción se enviaría a un topic SNS configurado.
-   */
-  private async publishAlert(alert: QualityAlert): Promise<void> {
-    // Placeholder: en producción se usaría AWS SNS
-    // await snsClient.publish({
-    //   TopicArn: QUALITY_ALERTS_TOPIC_ARN,
-    //   Subject: `Alerta de calidad: ${alert.ruleName}`,
-    //   Message: JSON.stringify(alert),
-    // });
-    console.warn(
-      `[Alerta de calidad] ${alert.severity.toUpperCase()}: ${alert.message}`,
-    );
   }
 }
 

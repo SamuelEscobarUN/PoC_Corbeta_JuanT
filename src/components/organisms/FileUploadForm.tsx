@@ -35,6 +35,10 @@ const STAGES = Object.keys(STAGE_DISPLAY_NAMES) as CascadeStage[];
 export interface FileUploadFormProps {
   /** Called after a successful upload so the parent can refresh history. */
   onUploadComplete?: (result: UploadResult) => void;
+  /** Optional session ID to associate uploads with a work session. */
+  sessionId?: string;
+  /** Called before upload starts. Can return a sessionId to use for this upload. */
+  onBeforeUpload?: () => Promise<string | undefined>;
 }
 
 /** Delimiter options for CSV parsing. */
@@ -46,7 +50,7 @@ const DELIMITER_OPTIONS: { value: string; label: string }[] = [
   { value: '|', label: 'Pipe (|)' },
 ];
 
-export default function FileUploadForm({ onUploadComplete }: FileUploadFormProps) {
+export default function FileUploadForm({ onUploadComplete, sessionId, onBeforeUpload }: FileUploadFormProps) {
   const { user } = useAuth();
   const [stage, setStage] = useState<CascadeStage | ''>('');
   const [delimiter, setDelimiter] = useState('auto');
@@ -82,7 +86,8 @@ export default function FileUploadForm({ onUploadComplete }: FileUploadFormProps
       }
 
       // Upload
-      const result = await uploadService.uploadFile(file, stage, content, user.userId);
+      const resolvedSessionId = onBeforeUpload ? await onBeforeUpload() : sessionId;
+      const result = await uploadService.uploadFile(file, stage, content, user.userId, resolvedSessionId);
       setUploadResult(result);
 
       if (result.status === 'success') {

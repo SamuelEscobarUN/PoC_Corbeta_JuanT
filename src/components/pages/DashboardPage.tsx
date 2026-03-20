@@ -1,11 +1,9 @@
 /**
  * DashboardPage — Página principal del dashboard de reconciliación.
  *
- * Muestra métricas consolidadas: resumen de reconciliación, discrepancias
- * por etapa, resultados de calidad, estado de remediación y trazabilidad.
+ * Muestra métricas consolidadas: resumen de plataforma, reconciliación,
+ * discrepancias por etapa, resultados de calidad y estado de remediación.
  * Todo el texto UI está en español.
- *
- * Requisitos: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 11.4, 11.5
  */
 import { useState, useEffect } from 'react';
 import {
@@ -24,19 +22,22 @@ import {
   TableHead,
   TableRow,
   LinearProgress,
+  alpha,
 } from '@mui/material';
+import CloudUploadIcon from '@mui/icons-material/CloudUpload';
+import FolderOpenIcon from '@mui/icons-material/FolderOpen';
+import HourglassTopIcon from '@mui/icons-material/HourglassTop';
+import TaskAltIcon from '@mui/icons-material/TaskAlt';
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import PercentIcon from '@mui/icons-material/Percent';
 import BuildIcon from '@mui/icons-material/Build';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CancelIcon from '@mui/icons-material/Cancel';
+import LayersIcon from '@mui/icons-material/Layers';
 import { DashboardService } from '../../services/dashboard';
-import type { DashboardData, StageDiscrepancies } from '../../types/dashboard';
+import type { DashboardData, StageDiscrepancies, PlatformSummary } from '../../types/dashboard';
 import type { DiscrepancyType } from '../../types/comparison';
-
-/** Total de facturas por defecto para la demo. */
-const DEFAULT_TOTAL_INVOICES = 1000;
 
 /** Etiquetas legibles para las etapas de la cascada. */
 const STAGE_LABELS: Record<string, string> = {
@@ -57,7 +58,6 @@ const DISCREPANCY_TYPE_LABELS: Record<DiscrepancyType, string> = {
   missing_item: 'Ítem perdido',
 };
 
-/** Obtener etiqueta legible de una etapa. */
 function stageLabel(stage: string): string {
   return STAGE_LABELS[stage] ?? stage;
 }
@@ -70,7 +70,7 @@ export default function DashboardPage() {
   useEffect(() => {
     const service = DashboardService.getInstance();
     service
-      .getDashboardData(DEFAULT_TOTAL_INVOICES)
+      .getDashboardData(0)
       .then((result) => {
         setData(result);
         setError(null);
@@ -105,7 +105,12 @@ export default function DashboardPage() {
 
   if (!data) return null;
 
-  const { reconciliation, stageDiscrepancies, quality, remediation } = data;
+  const { reconciliation, stageDiscrepancies, quality, remediation, platform } = data;
+
+  const hasDiscrepancies = reconciliation.invoicesWithDiscrepancies > 0;
+  const hasQuality = quality.totalRules > 0;
+  const hasRemediation = remediation.proposed > 0;
+  const hasStageDiscrepancies = stageDiscrepancies.some((s) => s.count > 0);
 
   return (
     <Box sx={{ py: 2 }} role="region" aria-label="Dashboard de reconciliación">
@@ -113,40 +118,183 @@ export default function DashboardPage() {
         Dashboard
       </Typography>
 
-      {/* Tarjetas de resumen */}
-      <SummaryCards
-        totalInvoices={reconciliation.totalInvoices}
-        invoicesWithDiscrepancies={reconciliation.invoicesWithDiscrepancies}
-        discrepancyRate={reconciliation.discrepancyRate}
-        remediationApproved={remediation.approved}
-        remediationPending={remediation.pendingApproval}
-      />
+      {/* Resumen de plataforma */}
+      <PlatformCards platform={platform} />
 
-      {/* Discrepancias por tipo */}
-      <DiscrepancyTypeCards countByType={reconciliation.countByType} />
+      {/* Tarjetas de reconciliación — solo si hay facturas */}
+      {reconciliation.totalInvoices > 0 && (
+        <>
+          <Typography variant="h6" gutterBottom sx={{ mt: 1 }}>
+            Reconciliación
+          </Typography>
+          <ReconciliationCards
+            totalInvoices={reconciliation.totalInvoices}
+            invoicesWithDiscrepancies={reconciliation.invoicesWithDiscrepancies}
+            discrepancyRate={reconciliation.discrepancyRate}
+            remediationApproved={remediation.approved}
+            remediationPending={remediation.pendingApproval}
+          />
+        </>
+      )}
 
-      {/* Discrepancias por etapa */}
-      <StageDiscrepanciesSection stages={stageDiscrepancies} />
+      {/* Discrepancias por tipo — solo si hay discrepancias */}
+      {hasDiscrepancies && (
+        <DiscrepancyTypeCards countByType={reconciliation.countByType} />
+      )}
 
-      {/* Resultados de calidad */}
-      <QualityResultsSection
-        totalRules={quality.totalRules}
-        passed={quality.passed}
-        failed={quality.failed}
-        byDataset={quality.byDataset}
-      />
+      {/* Discrepancias por etapa — solo si hay al menos una */}
+      {hasStageDiscrepancies && (
+        <StageDiscrepanciesSection stages={stageDiscrepancies.filter((s) => s.count > 0)} />
+      )}
 
-      {/* Estado de remediación */}
-      <RemediationStatusSection remediation={remediation} />
+      {/* Resultados de calidad — solo si hay reglas ejecutadas */}
+      {hasQuality && (
+        <QualityResultsSection
+          totalRules={quality.totalRules}
+          passed={quality.passed}
+          failed={quality.failed}
+          byDataset={quality.byDataset}
+        />
+      )}
+
+      {/* Estado de remediación — solo si hay correcciones */}
+      {hasRemediation && (
+        <RemediationStatusSection remediation={remediation} />
+      )}
     </Box>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/*  Tarjetas de resumen principal                                     */
+/*  Stat card reutilizable con icono y color de fondo                 */
 /* ------------------------------------------------------------------ */
 
-interface SummaryCardsProps {
+interface StatCardProps {
+  label: string;
+  value: string | number;
+  icon: React.ReactNode;
+  color: string;
+}
+
+function StatCard({ label, value, icon, color }: StatCardProps) {
+  return (
+    <Card sx={{ height: '100%' }}>
+      <CardContent sx={{ display: 'flex', alignItems: 'center', gap: 2, py: 2.5 }}>
+        <Box
+          sx={{
+            width: 52,
+            height: 52,
+            borderRadius: 2,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            bgcolor: alpha(color, 0.12),
+            color,
+            flexShrink: 0,
+          }}
+        >
+          {icon}
+        </Box>
+        <Box sx={{ minWidth: 0 }}>
+          <Typography variant="body2" color="text.secondary" noWrap>
+            {label}
+          </Typography>
+          <Typography variant="h5" fontWeight={700} noWrap>
+            {typeof value === 'number' ? value.toLocaleString('es-CO') : value}
+          </Typography>
+        </Box>
+      </CardContent>
+    </Card>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Tarjetas de plataforma (uploads y sesiones)                       */
+/* ------------------------------------------------------------------ */
+
+function PlatformCards({ platform }: { platform: PlatformSummary }) {
+  const stageEntries = Object.entries(platform.uploadsByStage);
+
+  return (
+    <Box sx={{ mb: 4 }}>
+      <Grid container spacing={2}>
+        <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+          <StatCard
+            label="Total Archivos Subidos"
+            value={platform.totalUploads}
+            icon={<CloudUploadIcon fontSize="medium" />}
+            color="#0055b8"
+          />
+        </Grid>
+        <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+          <StatCard
+            label="Total Sesiones"
+            value={platform.totalSessions}
+            icon={<FolderOpenIcon fontSize="medium" />}
+            color="#001689"
+          />
+        </Grid>
+        <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+          <StatCard
+            label="Sesiones En Progreso"
+            value={platform.sessionsInProgress}
+            icon={<HourglassTopIcon fontSize="medium" />}
+            color="#ffb548"
+          />
+        </Grid>
+        <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+          <StatCard
+            label="Sesiones Completadas"
+            value={platform.sessionsCompleted}
+            icon={<TaskAltIcon fontSize="medium" />}
+            color="#00c387"
+          />
+        </Grid>
+      </Grid>
+
+      {/* Archivos por etapa */}
+      {stageEntries.length > 0 && (
+        <Card sx={{ mt: 2 }}>
+          <CardContent>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+              <LayersIcon color="primary" />
+              <Typography variant="subtitle1" fontWeight={600}>
+                Archivos por Etapa
+              </Typography>
+            </Box>
+            <Grid container spacing={2}>
+              {stageEntries.map(([stage, count]) => (
+                <Grid key={stage} size={{ xs: 6, sm: 3 }}>
+                  <Box
+                    sx={{
+                      textAlign: 'center',
+                      p: 1.5,
+                      borderRadius: 2,
+                      bgcolor: 'background.default',
+                    }}
+                  >
+                    <Typography variant="body2" color="text.secondary">
+                      {stageLabel(stage)}
+                    </Typography>
+                    <Typography variant="h6" fontWeight={700} color="primary.main">
+                      {count}
+                    </Typography>
+                  </Box>
+                </Grid>
+              ))}
+            </Grid>
+          </CardContent>
+        </Card>
+      )}
+    </Box>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Tarjetas de reconciliación                                        */
+/* ------------------------------------------------------------------ */
+
+interface ReconciliationCardsProps {
   totalInvoices: number;
   invoicesWithDiscrepancies: number;
   discrepancyRate: number;
@@ -154,55 +302,47 @@ interface SummaryCardsProps {
   remediationPending: number;
 }
 
-function SummaryCards({
+function ReconciliationCards({
   totalInvoices,
   invoicesWithDiscrepancies,
   discrepancyRate,
   remediationApproved,
   remediationPending,
-}: SummaryCardsProps) {
-  const cards = [
-    {
-      label: 'Total Facturas',
-      value: totalInvoices.toLocaleString('es-CO'),
-      icon: <ReceiptLongIcon sx={{ fontSize: 40, color: 'primary.main' }} />,
-    },
-    {
-      label: 'Con Discrepancias',
-      value: invoicesWithDiscrepancies.toLocaleString('es-CO'),
-      icon: <WarningAmberIcon sx={{ fontSize: 40, color: 'warning.main' }} />,
-    },
-    {
-      label: 'Tasa de Discrepancia',
-      value: `${(discrepancyRate * 100).toFixed(1)}%`,
-      icon: <PercentIcon sx={{ fontSize: 40, color: 'error.main' }} />,
-    },
-    {
-      label: 'Remediación',
-      value: `${remediationApproved} aprobadas / ${remediationPending} pendientes`,
-      icon: <BuildIcon sx={{ fontSize: 40, color: 'secondary.main' }} />,
-    },
-  ];
-
+}: ReconciliationCardsProps) {
   return (
     <Grid container spacing={2} sx={{ mb: 4 }}>
-      {cards.map((card) => (
-        <Grid key={card.label} size={{ xs: 12, sm: 6, md: 3 }}>
-          <Card>
-            <CardContent sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-              {card.icon}
-              <Box>
-                <Typography variant="body2" color="text.secondary">
-                  {card.label}
-                </Typography>
-                <Typography variant="h6" fontWeight={600}>
-                  {card.value}
-                </Typography>
-              </Box>
-            </CardContent>
-          </Card>
-        </Grid>
-      ))}
+      <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+        <StatCard
+          label="Total Facturas"
+          value={totalInvoices}
+          icon={<ReceiptLongIcon fontSize="medium" />}
+          color="#001689"
+        />
+      </Grid>
+      <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+        <StatCard
+          label="Con Discrepancias"
+          value={invoicesWithDiscrepancies}
+          icon={<WarningAmberIcon fontSize="medium" />}
+          color="#ffb548"
+        />
+      </Grid>
+      <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+        <StatCard
+          label="Tasa de Discrepancia"
+          value={`${(discrepancyRate * 100).toFixed(1)}%`}
+          icon={<PercentIcon fontSize="medium" />}
+          color="rgb(253, 74, 92)"
+        />
+      </Grid>
+      <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+        <StatCard
+          label="Remediación"
+          value={`${remediationApproved} / ${remediationPending} pend.`}
+          icon={<BuildIcon fontSize="medium" />}
+          color="#2ed9c3"
+        />
+      </Grid>
     </Grid>
   );
 }
@@ -273,7 +413,6 @@ function StageDiscrepanciesSection({ stages }: { stages: StageDiscrepancies[] })
                       discrepancias
                     </Typography>
 
-                    {/* Tabla de facturas con discrepancias en este par */}
                     {s.discrepancies.length > 0 && (
                       <TableContainer sx={{ mt: 2, maxHeight: 200 }}>
                         <Table size="small" aria-label={`Discrepancias ${stageLabel(s.stagePair.source)} a ${stageLabel(s.stagePair.target)}`}>

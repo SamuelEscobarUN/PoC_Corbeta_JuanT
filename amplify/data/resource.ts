@@ -1,5 +1,7 @@
 import { type ClientSchema, a, defineData } from '@aws-amplify/backend';
 import { defineFunction } from '@aws-amplify/backend';
+import { userManagementFn } from '../functions/user-management/resource';
+import { qualityEvaluatorFn } from '../functions/quality-evaluator/resource';
 
 const findingsAnalyzerFn = defineFunction({
   name: 'findings-analyzer',
@@ -19,9 +21,31 @@ const findingsAnalyzerFn = defineFunction({
  * - QualityResults: PK=UPLOAD#{uploadId}, SK=QUALITY#{ruleId}
  */
 const schema = a.schema({
+  Session: a
+    .model({
+      sessionId: a.id().required(),
+      sessionName: a.string().required(),
+      status: a.enum(['in_progress', 'completed', 'archived']),
+      createdBy: a.string().required(),
+      createdAt: a.datetime().required(),
+      completedAt: a.datetime(),
+      uploadIds: a.string().array().required(),
+      discrepancyCount: a.integer(),
+      findingCount: a.integer(),
+    })
+    .identifier(['sessionId'])
+    .secondaryIndexes((index) => [
+      index('status').sortKeys(['createdAt']).name('status-date-index'),
+    ])
+    .authorization((allow) => [
+      allow.group('Administrator'),
+      allow.group('Operator'),
+    ]),
+
   Upload: a
     .model({
       uploadId: a.id().required(),
+      sessionId: a.string(),
       stage: a.string().required(),
       fileName: a.string().required(),
       fileSize: a.integer(),
@@ -35,6 +59,7 @@ const schema = a.schema({
     .secondaryIndexes((index) => [
       index('stage').sortKeys(['uploadedAt']).name('stage-date-index'),
       index('status').sortKeys(['uploadedAt']).name('status-date-index'),
+      index('sessionId').sortKeys(['stage']).name('sessionId-stage-index'),
     ])
     .authorization((allow) => [
       allow.group('Administrator'),
@@ -72,6 +97,7 @@ const schema = a.schema({
     .model({
       discrepancyId: a.string().required(),
       findingId: a.id().required(),
+      sessionId: a.string(),
       explanation: a.string().required(),
       probableCause: a.string().required(),
       recommendation: a.string().required(),
@@ -90,6 +116,7 @@ const schema = a.schema({
       correctionId: a.id().required(),
       discrepancyId: a.string().required(),
       findingId: a.string().required(),
+      sessionId: a.string(),
       invoice: a.string().required(),
       item: a.string(),
       originStage: a.string().required(),
@@ -109,6 +136,28 @@ const schema = a.schema({
     .authorization((allow) => [
       allow.group('Administrator'),
       allow.group('Operator'),
+    ]),
+
+  QualityRule: a
+    .model({
+      ruleId: a.id().required(),
+      ruleName: a.string().required(),
+      stage: a.string().required(),
+      type: a.string().required(),
+      expression: a.string().required(),
+      targetColumn: a.string(),
+      threshold: a.float().required(),
+      enabled: a.boolean().required(),
+      createdAt: a.datetime().required(),
+      updatedBy: a.string(),
+    })
+    .identifier(['ruleId'])
+    .secondaryIndexes((index) => [
+      index('stage').sortKeys(['createdAt']).name('stage-index'),
+    ])
+    .authorization((allow) => [
+      allow.group('Administrator'),
+      allow.group('Operator').to(['read']),
     ]),
 
   QualityResult: a
@@ -135,6 +184,33 @@ const schema = a.schema({
     })
     .returns(a.string())
     .handler(a.handler.function(findingsAnalyzerFn))
+    .authorization((allow) => [
+      allow.group('Administrator'),
+      allow.group('Operator'),
+    ]),
+
+  /** Custom query: manage Cognito users (list, create, delete, assign role) */
+  manageUsers: a
+    .query()
+    .arguments({
+      action: a.string().required(),
+      payload: a.string(),
+    })
+    .returns(a.string())
+    .handler(a.handler.function(userManagementFn))
+    .authorization((allow) => [
+      allow.group('Administrator'),
+    ]),
+
+  /** Custom query: execute quality rules via AWS Glue Data Quality */
+  executeQualityRules: a
+    .query()
+    .arguments({
+      uploadId: a.string().required(),
+      stage: a.string().required(),
+    })
+    .returns(a.string())
+    .handler(a.handler.function(qualityEvaluatorFn))
     .authorization((allow) => [
       allow.group('Administrator'),
       allow.group('Operator'),

@@ -1,31 +1,57 @@
 /**
- * Tests unitarios para QualityRulesService.
+ * Tests unitarios para QualityRulesService (refactorizado).
  *
- * Se mockean las llamadas a Amplify Data (DynamoDB) y crypto.randomUUID
+ * Se mockean las llamadas a Amplify Data (DynamoDB) y AppSync queries
  * para que los tests corran sin servicios AWS reales.
  *
  * Verificamos:
- *  - CRUD de reglas de calidad (crear, actualizar, eliminar, listar)
- *  - Ejecución de reglas contra datos y registro de resultados
- *  - Evaluación correcta por tipo de regla (completeness, uniqueness, range, format)
- *  - Generación de alertas cuando una regla falla
- *  - Resumen de ejecución con conteos passed/failed
+ *  - CRUD de reglas de calidad (crear, actualizar, eliminar, listar, obtener)
+ *  - Ejecución de reglas vía AppSync query
+ *  - Validación de expresiones DQDL
+ *  - Consulta de resultados históricos con filtros
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 /* ------------------------------------------------------------------ */
 /*  Mocks de Amplify antes de importar el servicio                    */
 /* ------------------------------------------------------------------ */
-const { mockQualityResultCreate } = vi.hoisted(() => ({
-  mockQualityResultCreate: vi.fn(),
+const {
+  mockQualityRuleCreate,
+  mockQualityRuleUpdate,
+  mockQualityRuleDelete,
+  mockQualityRuleGet,
+  mockQualityRuleList,
+  mockQualityRuleListByStage,
+  mockQualityResultList,
+  mockExecuteQualityRules,
+} = vi.hoisted(() => ({
+  mockQualityRuleCreate: vi.fn(),
+  mockQualityRuleUpdate: vi.fn(),
+  mockQualityRuleDelete: vi.fn(),
+  mockQualityRuleGet: vi.fn(),
+  mockQualityRuleList: vi.fn(),
+  mockQualityRuleListByStage: vi.fn(),
+  mockQualityResultList: vi.fn(),
+  mockExecuteQualityRules: vi.fn(),
 }));
 
 vi.mock('aws-amplify/data', () => ({
   generateClient: () => ({
     models: {
-      QualityResult: {
-        create: mockQualityResultCreate,
+      QualityRule: {
+        create: mockQualityRuleCreate,
+        update: mockQualityRuleUpdate,
+        delete: mockQualityRuleDelete,
+        get: mockQualityRuleGet,
+        list: mockQualityRuleList,
+        listQualityRuleByStageAndCreatedAt: mockQualityRuleListByStage,
       },
+      QualityResult: {
+        list: mockQualityResultList,
+      },
+    },
+    queries: {
+      executeQualityRules: mockExecuteQualityRules,
     },
   }),
 }));
@@ -44,21 +70,8 @@ import type { CreateQualityRuleInput } from '../types/quality';
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-/**
- * Crear una instancia limpia del servicio para cada test.
- * Usamos el método estático createForTesting para evitar estado compartido.
- */
 function createService(): QualityRulesService {
   return QualityRulesService.createForTesting();
-}
-
-/** Datos de ejemplo para pruebas. */
-function sampleData(): Record<string, string>[] {
-  return [
-    { invoice: 'INV-001', total: '100.50', barcode: 'BC001', description: 'Item A' },
-    { invoice: 'INV-002', total: '200.00', barcode: 'BC002', description: 'Item B' },
-    { invoice: 'INV-003', total: '50.75', barcode: 'BC003', description: '' },
-  ];
 }
 
 /** Input base para crear una regla. */
@@ -73,6 +86,22 @@ function baseRuleInput(overrides?: Partial<CreateQualityRuleInput>): CreateQuali
   };
 }
 
+/** Simula un registro DynamoDB de QualityRule. */
+function makeDynamoRule(overrides?: Partial<Record<string, unknown>>): Record<string, unknown> {
+  return {
+    ruleId: 'test-uuid-1',
+    ruleName: 'Regla de prueba',
+    stage: 'geopos_local',
+    type: 'completeness',
+    expression: '',
+    targetColumn: 'invoice',
+    threshold: 1.0,
+    enabled: true,
+    createdAt: '2024-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /*  Tests                                                              */
 /* ------------------------------------------------------------------ */
@@ -83,15 +112,21 @@ describe('QualityRulesService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     uuidCounter = 0;
-    mockQualityResultCreate.mockResolvedValue({ data: {} });
+    mockQualityRuleCreate.mockResolvedValue({ data: {} });
+    mockQualityRuleUpdate.mockResolvedValue({ data: {} });
+    mockQualityRuleDelete.mockResolvedValue({ data: {} });
+    mockQualityRuleGet.mockResolvedValue({ data: null });
+    mockQualityRuleList.mockResolvedValue({ data: [] });
+    mockQualityRuleListByStage.mockResolvedValue({ data: [] });
+    mockQualityResultList.mockResolvedValue({ data: [] });
     service = createService();
   });
 
   /* ---- CRUD de reglas -------------------------------------------- */
 
   describe('CRUD de reglas', () => {
-    it('crea una regla con valores por defecto', () => {
-      const rule = service.createRule(baseRuleInput());
+    it('crea una regla con valores por defecto', async () => {
+      const rule = await service.createRule(baseRuleInput());
 
       expect(rule.ruleId).toBe('test-uuid-1');
       expect(rule.ruleName).toBe('Regla de prueba');
@@ -100,17 +135,20 @@ describe('QualityRulesService', () => {
       expect(rule.threshold).toBe(1.0);
       expect(rule.enabled).toBe(true);
       expect(rule.createdAt).toBeTruthy();
+      expect(mockQualityRuleCreate).toHaveBeenCalledTimes(1);
     });
 
-    it('crea una regla con threshold personalizado', () => {
-      const rule = service.createRule(baseRuleInput({ threshold: 0.8 }));
-
+    it('crea una regla con threshold personalizado', async () => {
+      const rule = await service.createRule(baseRuleInput({ threshold: 0.8 }));
       expect(rule.threshold).toBe(0.8);
     });
 
-    it('actualiza una regla existente', () => {
-      const rule = service.createRule(baseRuleInput());
-      const updated = service.updateRule(rule.ruleId, {
+    it('actualiza una regla existente', async () => {
+      mockQualityRuleGet.mockResolvedValue({
+        data: makeDynamoRule(),
+      });
+
+      const updated = await service.updateRule('test-uuid-1', {
         ruleName: 'Regla actualizada',
         threshold: 0.9,
       });
@@ -118,298 +156,299 @@ describe('QualityRulesService', () => {
       expect(updated).not.toBeNull();
       expect(updated!.ruleName).toBe('Regla actualizada');
       expect(updated!.threshold).toBe(0.9);
-      // Campos no actualizados se mantienen
       expect(updated!.stage).toBe('geopos_local');
+      expect(mockQualityRuleUpdate).toHaveBeenCalledTimes(1);
     });
 
-    it('retorna null al actualizar una regla inexistente', () => {
-      const result = service.updateRule('no-existe', { ruleName: 'X' });
+    it('retorna null al actualizar una regla inexistente', async () => {
+      mockQualityRuleGet.mockResolvedValue({ data: null });
+      const result = await service.updateRule('no-existe', { ruleName: 'X' });
       expect(result).toBeNull();
     });
 
-    it('elimina una regla existente', () => {
-      const rule = service.createRule(baseRuleInput());
-      expect(service.deleteRule(rule.ruleId)).toBe(true);
-      expect(service.getRule(rule.ruleId)).toBeNull();
+    it('elimina una regla existente', async () => {
+      mockQualityRuleGet.mockResolvedValue({
+        data: makeDynamoRule(),
+      });
+
+      const deleted = await service.deleteRule('test-uuid-1');
+      expect(deleted).toBe(true);
+      expect(mockQualityRuleDelete).toHaveBeenCalledWith({ ruleId: 'test-uuid-1' });
     });
 
-    it('retorna false al eliminar una regla inexistente', () => {
-      expect(service.deleteRule('no-existe')).toBe(false);
+    it('retorna false al eliminar una regla inexistente', async () => {
+      mockQualityRuleGet.mockResolvedValue({ data: null });
+      const result = await service.deleteRule('no-existe');
+      expect(result).toBe(false);
     });
 
-    it('lista reglas filtradas por etapa', () => {
-      service.createRule(baseRuleInput({ stage: 'geopos_local' }));
-      service.createRule(baseRuleInput({ stage: 'integracion' }));
-      service.createRule(baseRuleInput({ stage: 'geopos_local' }));
+    it('lista reglas filtradas por etapa usando GSI', async () => {
+      mockQualityRuleListByStage.mockResolvedValue({
+        data: [
+          makeDynamoRule({ ruleId: 'r1' }),
+          makeDynamoRule({ ruleId: 'r2' }),
+        ],
+      });
 
-      const geoposRules = service.listRules('geopos_local');
-      expect(geoposRules).toHaveLength(2);
-
-      const intRules = service.listRules('integracion');
-      expect(intRules).toHaveLength(1);
+      const rules = await service.listRules('geopos_local');
+      expect(rules).toHaveLength(2);
+      expect(mockQualityRuleListByStage).toHaveBeenCalledWith(
+        { stage: 'geopos_local' },
+        { sortDirection: 'ASC' },
+      );
     });
 
-    it('lista todas las reglas sin filtro de etapa', () => {
-      service.createRule(baseRuleInput({ stage: 'geopos_local' }));
-      service.createRule(baseRuleInput({ stage: 'integracion' }));
+    it('lista todas las reglas sin filtro de etapa', async () => {
+      mockQualityRuleList.mockResolvedValue({
+        data: [
+          makeDynamoRule({ ruleId: 'r1', stage: 'geopos_local' }),
+          makeDynamoRule({ ruleId: 'r2', stage: 'integracion' }),
+        ],
+      });
 
-      const all = service.listRules();
+      const all = await service.listRules();
       expect(all).toHaveLength(2);
+      expect(mockQualityRuleList).toHaveBeenCalled();
     });
 
-    it('obtiene una regla por ID', () => {
-      const rule = service.createRule(baseRuleInput());
-      const found = service.getRule(rule.ruleId);
+    it('obtiene una regla por ID', async () => {
+      mockQualityRuleGet.mockResolvedValue({
+        data: makeDynamoRule(),
+      });
 
+      const found = await service.getRule('test-uuid-1');
       expect(found).not.toBeNull();
-      expect(found!.ruleId).toBe(rule.ruleId);
+      expect(found!.ruleId).toBe('test-uuid-1');
     });
 
-    it('retorna null para regla inexistente', () => {
-      expect(service.getRule('no-existe')).toBeNull();
-    });
-  });
-
-  /* ---- Evaluación de reglas -------------------------------------- */
-
-  describe('evaluateRule', () => {
-    it('completeness: detecta valores vacíos', () => {
-      const rule = service.createRule(
-        baseRuleInput({ type: 'completeness', targetColumn: 'description' }),
-      );
-      const details = service.evaluateRule(rule, sampleData());
-
-      // El tercer registro tiene description vacío
-      expect(details.recordsEvaluated).toBe(3);
-      expect(details.recordsPassed).toBe(2);
-      expect(details.recordsFailed).toBe(1);
-      expect(details.compliancePercent).toBeCloseTo(66.67, 1);
-    });
-
-    it('completeness: pasa cuando todos los valores están presentes', () => {
-      const rule = service.createRule(
-        baseRuleInput({ type: 'completeness', targetColumn: 'invoice' }),
-      );
-      const details = service.evaluateRule(rule, sampleData());
-
-      expect(details.recordsPassed).toBe(3);
-      expect(details.recordsFailed).toBe(0);
-      expect(details.compliancePercent).toBe(100);
-    });
-
-    it('uniqueness: detecta valores duplicados', () => {
-      const rule = service.createRule(
-        baseRuleInput({ type: 'uniqueness', targetColumn: 'total' }),
-      );
-      const data = [
-        { total: '100' },
-        { total: '200' },
-        { total: '100' }, // duplicado
-      ];
-      const details = service.evaluateRule(rule, data);
-
-      expect(details.recordsFailed).toBe(2); // ambos '100' son duplicados
-      expect(details.recordsPassed).toBe(1);
-    });
-
-    it('uniqueness: pasa cuando todos los valores son únicos', () => {
-      const rule = service.createRule(
-        baseRuleInput({ type: 'uniqueness', targetColumn: 'invoice' }),
-      );
-      const details = service.evaluateRule(rule, sampleData());
-
-      expect(details.recordsPassed).toBe(3);
-      expect(details.recordsFailed).toBe(0);
-    });
-
-    it('range: detecta valores fuera de rango', () => {
-      const rule = service.createRule(
-        baseRuleInput({
-          type: 'range',
-          targetColumn: 'total',
-          expression: '60,250',
-        }),
-      );
-      const details = service.evaluateRule(rule, sampleData());
-
-      // 100.50 y 200.00 están en rango, 50.75 está fuera
-      expect(details.recordsPassed).toBe(2);
-      expect(details.recordsFailed).toBe(1);
-    });
-
-    it('range: pasa cuando todos los valores están en rango', () => {
-      const rule = service.createRule(
-        baseRuleInput({
-          type: 'range',
-          targetColumn: 'total',
-          expression: '0,500',
-        }),
-      );
-      const details = service.evaluateRule(rule, sampleData());
-
-      expect(details.recordsPassed).toBe(3);
-      expect(details.recordsFailed).toBe(0);
-    });
-
-    it('format: detecta valores que no coinciden con regex', () => {
-      const rule = service.createRule(
-        baseRuleInput({
-          type: 'format',
-          targetColumn: 'invoice',
-          expression: '^INV-00[12]$',
-        }),
-      );
-      const details = service.evaluateRule(rule, sampleData());
-
-      // INV-001 e INV-002 coinciden, INV-003 no
-      expect(details.recordsPassed).toBe(2);
-      expect(details.recordsFailed).toBe(1);
-    });
-
-    it('retorna 0% cumplimiento para datos vacíos', () => {
-      const rule = service.createRule(baseRuleInput());
-      const details = service.evaluateRule(rule, []);
-
-      expect(details.recordsEvaluated).toBe(0);
-      expect(details.compliancePercent).toBe(0);
-    });
-
-    it('completeness: falla si no se especifica columna objetivo', () => {
-      const rule = service.createRule(
-        baseRuleInput({ type: 'completeness', targetColumn: undefined }),
-      );
-      const details = service.evaluateRule(rule, sampleData());
-
-      expect(details.recordsPassed).toBe(0);
-      expect(details.message).toContain('No se especificó columna objetivo');
+    it('retorna null para regla inexistente', async () => {
+      mockQualityRuleGet.mockResolvedValue({ data: null });
+      const result = await service.getRule('no-existe');
+      expect(result).toBeNull();
     });
   });
 
-  /* ---- Ejecución de reglas y registro en DynamoDB ----------------- */
+  /* ---- Ejecución de reglas vía AppSync ----------------------------- */
 
   describe('executeRules', () => {
     const stage: CascadeStage = 'geopos_local';
     const uploadId = 'upload-123';
 
-    it('ejecuta reglas activas y retorna resumen', async () => {
-      service.createRule(
-        baseRuleInput({
-          stage,
-          type: 'completeness',
-          targetColumn: 'invoice',
-        }),
-      );
-      service.createRule(
-        baseRuleInput({
-          stage,
-          type: 'completeness',
-          targetColumn: 'description',
-        }),
-      );
+    it('invoca la query AppSync y retorna el resumen', async () => {
+      const mockSummary = {
+        uploadId,
+        stage,
+        totalRules: 2,
+        passed: 1,
+        failed: 1,
+        results: [],
+        alerts: [],
+        executedAt: '2024-01-01T00:00:00.000Z',
+      };
 
-      const summary = await service.executeRules(uploadId, stage, sampleData());
+      mockExecuteQualityRules.mockResolvedValue({
+        data: JSON.stringify(mockSummary),
+        errors: null,
+      });
+
+      const summary = await service.executeRules(uploadId, stage);
 
       expect(summary.uploadId).toBe(uploadId);
       expect(summary.stage).toBe(stage);
       expect(summary.totalRules).toBe(2);
-      // invoice: todos completos → passed; description: 1 vacío → failed (threshold=1.0)
       expect(summary.passed).toBe(1);
       expect(summary.failed).toBe(1);
-      expect(summary.results).toHaveLength(2);
+      expect(mockExecuteQualityRules).toHaveBeenCalledWith({
+        uploadId,
+        stage,
+      });
     });
 
-    it('registra cada resultado en DynamoDB', async () => {
-      service.createRule(
-        baseRuleInput({ stage, type: 'completeness', targetColumn: 'invoice' }),
-      );
+    it('lanza error cuando AppSync retorna errores', async () => {
+      mockExecuteQualityRules.mockResolvedValue({
+        data: null,
+        errors: [{ message: 'Upload no encontrado' }],
+      });
 
-      await service.executeRules(uploadId, stage, sampleData());
-
-      expect(mockQualityResultCreate).toHaveBeenCalledTimes(1);
-      expect(mockQualityResultCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          uploadId,
-          result: 'passed',
-        }),
+      await expect(service.executeRules(uploadId, stage)).rejects.toThrow(
+        'Upload no encontrado',
       );
     });
 
-    it('genera alerta cuando una regla falla', async () => {
-      // Espiar console.warn para verificar que se genera la alerta
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    it('lanza error cuando no hay datos de respuesta', async () => {
+      mockExecuteQualityRules.mockResolvedValue({
+        data: null,
+        errors: null,
+      });
 
-      service.createRule(
-        baseRuleInput({
-          stage,
-          type: 'completeness',
-          targetColumn: 'description',
-          // threshold 1.0 por defecto → 66.67% cumplimiento = falla
-        }),
+      await expect(service.executeRules(uploadId, stage)).rejects.toThrow(
+        'No se recibió respuesta',
       );
+    });
+  });
 
-      const summary = await service.executeRules(uploadId, stage, sampleData());
+  /* ---- Validación DQDL ------------------------------------------- */
 
-      expect(summary.failed).toBe(1);
-      // Verificar que se llamó a publishAlert (via console.warn placeholder)
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[Alerta de calidad]'),
+  describe('validateExpression', () => {
+    it('valida una expresión completeness válida', () => {
+      const result = service.validateExpression(
+        'Completeness "invoice" >= 1.0',
+        'completeness',
       );
-
-      warnSpy.mockRestore();
+      expect(result.valid).toBe(true);
     });
 
-    it('no ejecuta reglas deshabilitadas', async () => {
-      service.createRule(
-        baseRuleInput({ stage, enabled: false, targetColumn: 'invoice' }),
-      );
-
-      const summary = await service.executeRules(uploadId, stage, sampleData());
-
-      expect(summary.totalRules).toBe(0);
-      expect(mockQualityResultCreate).not.toHaveBeenCalled();
+    it('rechaza una expresión vacía', () => {
+      const result = service.validateExpression('', 'custom');
+      expect(result.valid).toBe(false);
+      expect(result.error).toBeTruthy();
     });
 
-    it('no ejecuta reglas de otra etapa', async () => {
-      service.createRule(
-        baseRuleInput({ stage: 'integracion', targetColumn: 'invoice' }),
-      );
-
-      const summary = await service.executeRules(uploadId, stage, sampleData());
-
-      expect(summary.totalRules).toBe(0);
+    it('rechaza una expresión DQDL inválida', () => {
+      const result = service.validateExpression('INVALID STUFF', 'custom');
+      expect(result.valid).toBe(false);
     });
 
-    it('maneja errores de DynamoDB sin interrumpir ejecución', async () => {
-      mockQualityResultCreate.mockRejectedValue(new Error('DynamoDB error'));
+    it('valida una expresión uniqueness válida', () => {
+      const result = service.validateExpression(
+        'Uniqueness "barcode" >= 0.95',
+        'uniqueness',
+      );
+      expect(result.valid).toBe(true);
+    });
+  });
+
+  /* ---- Generación de expresión base ------------------------------ */
+
+  describe('generateBaseExpression', () => {
+    it('genera expresión base para completeness', () => {
+      const expr = service.generateBaseExpression('completeness', 'invoice');
+      expect(expr).toContain('Completeness');
+      expect(expr).toContain('invoice');
+    });
+
+    it('genera expresión base para range', () => {
+      const expr = service.generateBaseExpression('range', 'total');
+      expect(expr).toContain('ColumnValues');
+      expect(expr).toContain('between');
+    });
+  });
+
+  /* ---- Consulta de resultados históricos ------------------------- */
+
+  describe('getExecutionResults', () => {
+    it('retorna resultados agrupados por uploadId', async () => {
+      mockQualityResultList.mockResolvedValue({
+        data: [
+          {
+            uploadId: 'upload-1',
+            ruleId: 'rule-1',
+            ruleName: 'Regla 1',
+            ruleExpression: 'Completeness "col" >= 1.0',
+            result: 'passed',
+            details: JSON.stringify({
+              recordsEvaluated: 100,
+              recordsPassed: 100,
+              recordsFailed: 0,
+              compliancePercent: 100,
+              message: 'OK',
+            }),
+            executedAt: '2024-01-02T00:00:00.000Z',
+          },
+          {
+            uploadId: 'upload-1',
+            ruleId: 'rule-2',
+            ruleName: 'Regla 2',
+            ruleExpression: 'Uniqueness "col" >= 0.9',
+            result: 'failed',
+            details: JSON.stringify({
+              recordsEvaluated: 100,
+              recordsPassed: 80,
+              recordsFailed: 20,
+              compliancePercent: 80,
+              message: 'Duplicados',
+            }),
+            executedAt: '2024-01-02T00:00:00.000Z',
+          },
+        ],
+      });
+
+      const results = await service.getExecutionResults();
+
+      expect(results).toHaveLength(1);
+      expect(results[0].uploadId).toBe('upload-1');
+      expect(results[0].totalRules).toBe(2);
+      expect(results[0].passed).toBe(1);
+      expect(results[0].failed).toBe(1);
+    });
+
+    it('filtra resultados por rango de fechas', async () => {
+      mockQualityResultList.mockResolvedValue({
+        data: [
+          {
+            uploadId: 'upload-1',
+            ruleId: 'rule-1',
+            ruleName: 'R1',
+            result: 'passed',
+            details: '{}',
+            executedAt: '2024-01-01T00:00:00.000Z',
+          },
+          {
+            uploadId: 'upload-2',
+            ruleId: 'rule-2',
+            ruleName: 'R2',
+            result: 'passed',
+            details: '{}',
+            executedAt: '2024-06-01T00:00:00.000Z',
+          },
+        ],
+      });
+
+      const results = await service.getExecutionResults({
+        dateFrom: '2024-03-01',
+        dateTo: '2024-12-31',
+      });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].uploadId).toBe('upload-2');
+    });
+
+    it('ordena resultados por fecha descendente', async () => {
+      mockQualityResultList.mockResolvedValue({
+        data: [
+          {
+            uploadId: 'upload-old',
+            ruleId: 'r1',
+            ruleName: 'R1',
+            result: 'passed',
+            details: '{}',
+            executedAt: '2024-01-01T00:00:00.000Z',
+          },
+          {
+            uploadId: 'upload-new',
+            ruleId: 'r2',
+            ruleName: 'R2',
+            result: 'passed',
+            details: '{}',
+            executedAt: '2024-06-01T00:00:00.000Z',
+          },
+        ],
+      });
+
+      const results = await service.getExecutionResults();
+
+      expect(results[0].uploadId).toBe('upload-new');
+      expect(results[1].uploadId).toBe('upload-old');
+    });
+
+    it('retorna array vacío cuando hay error', async () => {
+      mockQualityResultList.mockRejectedValue(new Error('DynamoDB error'));
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-      service.createRule(
-        baseRuleInput({ stage, type: 'completeness', targetColumn: 'invoice' }),
-      );
+      const results = await service.getExecutionResults();
 
-      // No debe lanzar excepción
-      const summary = await service.executeRules(uploadId, stage, sampleData());
-
-      expect(summary.totalRules).toBe(1);
-      expect(errorSpy).toHaveBeenCalled();
-
+      expect(results).toEqual([]);
       errorSpy.mockRestore();
-    });
-
-    it('regla con threshold bajo pasa con cumplimiento parcial', async () => {
-      service.createRule(
-        baseRuleInput({
-          stage,
-          type: 'completeness',
-          targetColumn: 'description',
-          threshold: 0.5, // 50% → 66.67% cumplimiento pasa
-        }),
-      );
-
-      const summary = await service.executeRules(uploadId, stage, sampleData());
-
-      expect(summary.passed).toBe(1);
-      expect(summary.failed).toBe(0);
     });
   });
 });

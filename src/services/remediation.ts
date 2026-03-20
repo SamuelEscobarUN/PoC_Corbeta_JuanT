@@ -60,7 +60,7 @@ export class RemediationService {
     const now = new Date().toISOString();
     const correctionId = crypto.randomUUID();
 
-    const record = {
+    const record: Record<string, unknown> = {
       correctionId,
       discrepancyId: input.discrepancyId,
       findingId: input.findingId,
@@ -73,8 +73,13 @@ export class RemediationService {
       proposedAt: now,
     };
 
+    // Incluir sessionId si está disponible
+    if (input.sessionId) {
+      record.sessionId = input.sessionId;
+    }
+
     try {
-      await client.models.Correction.create(record);
+      await client.models.Correction.create(record as Parameters<typeof client.models.Correction.create>[0]);
     } catch (error) {
       console.error(`Error al crear corrección para factura ${input.invoice}:`, error);
       throw error;
@@ -144,7 +149,13 @@ export class RemediationService {
 
     try {
       const { xmlGeneratorService } = await import('./xml-generator');
-      await xmlGeneratorService.saveCorrectionXml(approvedCorrection);
+      const xmlS3Key = await xmlGeneratorService.saveCorrectionXml(approvedCorrection);
+      // Guardar la referencia al XML en DynamoDB
+      await client.models.Correction.update({
+        correctionId,
+        xmlS3Key,
+      });
+      approvedCorrection.xmlS3Key = xmlS3Key;
     } catch (xmlError) {
       console.error(`Error al generar XML para corrección ${correctionId}:`, xmlError);
       // No bloquear la aprobación si falla la generación de XML

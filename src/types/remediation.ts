@@ -65,6 +65,8 @@ export interface ProposeCorrectionInput {
   correctedValues: Record<string, unknown>;
   /** Usuario que propone la corrección. */
   proposedBy: string;
+  /** Identificador de la sesión activa (opcional para retrocompatibilidad). */
+  sessionId?: string;
 }
 
 /** Input para aprobar una corrección. */

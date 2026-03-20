@@ -14,6 +14,7 @@
  */
 
 import { generateClient } from 'aws-amplify/data';
+import { remove } from 'aws-amplify/storage';
 
 import type { Schema } from '../../amplify/data/resource';
 import type { CascadeStage } from '../types/csv';
@@ -30,6 +31,7 @@ import type {
   DatasetQualitySummary,
   RemediationStatus,
   DashboardData,
+  PlatformSummary,
 } from '../types/dashboard';
 import { ComparisonPairs } from '../amplify-config';
 
@@ -265,20 +267,45 @@ export class DashboardService {
    */
   async getDashboardData(totalInvoices: number): Promise<DashboardData> {
     // Fetch all data once to avoid duplicate AppSync queries
-    const [discrepancies, qualityResults, corrections] = await Promise.all([
+    const [discrepancies, qualityResults, corrections, uploads, sessions] = await Promise.all([
       this.fetchAllDiscrepancies(),
       this.fetchAllQualityResults(),
       this.fetchAllCorrections(),
+      this.fetchAllUploads(),
+      this.fetchAllSessions(),
     ]);
+
+    // Platform summary
+    const uploadsByStage: Record<string, number> = {};
+    for (const u of uploads) {
+      const stage = u.stage as string;
+      uploadsByStage[stage] = (uploadsByStage[stage] ?? 0) + 1;
+    }
+    let sessionsInProgress = 0;
+    let sessionsCompleted = 0;
+    for (const s of sessions) {
+      if (s.status === 'in_progress') sessionsInProgress++;
+      else if (s.status === 'completed') sessionsCompleted++;
+    }
+    const platform: PlatformSummary = {
+      totalUploads: uploads.length,
+      totalSessions: sessions.length,
+      sessionsInProgress,
+      sessionsCompleted,
+      uploadsByStage,
+    };
+
+    // Use real upload count as totalInvoices if the default was passed
+    const effectiveTotal = uploads.length > 0 ? uploads.length : totalInvoices;
 
     // Build reconciliation summary from pre-fetched discrepancies
     const invoicesWithDisc = new Set(discrepancies.map((d) => d.invoice));
     const countByType = this.buildCountByType(discrepancies);
     const discrepancyRate =
-      totalInvoices > 0 ? invoicesWithDisc.size / totalInvoices : 0;
+      effectiveTotal > 0 ? invoicesWithDisc.size / effectiveTotal : 0;
 
     const reconciliation: ReconciliationSummary = {
-      totalInvoices,
+      totalInvoices: effectiveTotal,
       invoicesWithDiscrepancies: invoicesWithDisc.size,
       discrepancyRate,
       countByType,
@@ -365,7 +392,114 @@ export class DashboardService {
       xmlGenerated,
     };
 
-    return { reconciliation, stageDiscrepancies, quality, remediation };
+    return { reconciliation, stageDiscrepancies, quality, remediation, platform };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Limpieza de datos                                                 */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Eliminar todos los registros de todas las tablas.
+   * Útil para limpiar datos de prueba.
+   */
+  async purgeAllData(): Promise<{ deleted: Record<string, number> }> {
+    const deleted: Record<string, number> = {};
+
+    // 1. Corrections (PK: correctionId) — eliminar XML de S3 si existe
+    const corrections = await this.fetchAllCorrections();
+    for (const c of corrections) {
+      try {
+        const xmlKey = c.xmlS3Key as string;
+        if (xmlKey) {
+          await remove({
+            path: xmlKey,
+            options: { bucket: 'reconciliationStorage' },
+          });
+        }
+      } catch { /* best-effort */ }
+      try {
+        await client.models.Correction.delete({ correctionId: c.correctionId as string });
+      } catch { /* best-effort */ }
+    }
+    deleted.corrections = corrections.length;
+
+    // 2. Findings (PK: discrepancyId, SK: findingId)
+    try {
+      const { data: findings } = await client.models.Finding.list({ limit: 1000 });
+      for (const f of (findings ?? [])) {
+        try {
+          await client.models.Finding.delete({
+            discrepancyId: f.discrepancyId,
+            findingId: f.findingId,
+          });
+        } catch { /* best-effort */ }
+      }
+      deleted.findings = (findings ?? []).length;
+    } catch {
+      deleted.findings = 0;
+    }
+
+    // 3. Discrepancies (PK: sessionId, SK: discrepancyId)
+    try {
+      const { data: discrepancies } = await client.models.Discrepancy.list({ limit: 1000 });
+      for (const d of (discrepancies ?? [])) {
+        try {
+          await client.models.Discrepancy.delete({
+            sessionId: d.sessionId,
+            discrepancyId: d.discrepancyId,
+          });
+        } catch { /* best-effort */ }
+      }
+      deleted.discrepancies = (discrepancies ?? []).length;
+    } catch {
+      deleted.discrepancies = 0;
+    }
+
+    // 4. QualityResults (PK: uploadId, SK: ruleId)
+    try {
+      const { data: qr } = await client.models.QualityResult.list({ limit: 1000 });
+      for (const q of (qr ?? [])) {
+        try {
+          await client.models.QualityResult.delete({
+            uploadId: q.uploadId,
+            ruleId: q.ruleId,
+          });
+        } catch { /* best-effort */ }
+      }
+      deleted.qualityResults = (qr ?? []).length;
+    } catch {
+      deleted.qualityResults = 0;
+    }
+
+    // 5. Uploads (PK: uploadId) — eliminar archivo de S3 + registro DynamoDB
+    const uploads = await this.fetchAllUploads();
+    for (const u of uploads) {
+      try {
+        const s3Key = u.s3Key as string;
+        if (s3Key) {
+          await remove({
+            path: s3Key,
+            options: { bucket: 'reconciliationStorage' },
+          });
+        }
+      } catch { /* best-effort: archivo puede no existir */ }
+      try {
+        await client.models.Upload.delete({ uploadId: u.uploadId as string });
+      } catch { /* best-effort */ }
+    }
+    deleted.uploads = uploads.length;
+
+    // 6. Sessions (PK: sessionId)
+    const sessions = await this.fetchAllSessions();
+    for (const s of sessions) {
+      try {
+        await client.models.Session.delete({ sessionId: s.sessionId as string });
+      } catch { /* best-effort */ }
+    }
+    deleted.sessions = sessions.length;
+
+    return { deleted };
   }
 
   /* ------------------------------------------------------------------ */
@@ -423,6 +557,32 @@ export class DashboardService {
       return (data ?? []) as unknown as Record<string, unknown>[];
     } catch (error) {
       console.error('Error al consultar correcciones:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Obtener todos los uploads de DynamoDB.
+   */
+  private async fetchAllUploads(): Promise<Record<string, unknown>[]> {
+    try {
+      const { data } = await client.models.Upload.list({ limit: 1000 });
+      return (data ?? []) as unknown as Record<string, unknown>[];
+    } catch (error) {
+      console.error('Error al consultar uploads:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Obtener todas las sesiones de DynamoDB.
+   */
+  private async fetchAllSessions(): Promise<Record<string, unknown>[]> {
+    try {
+      const { data } = await client.models.Session.list({ limit: 1000 });
+      return (data ?? []) as unknown as Record<string, unknown>[];
+    } catch (error) {
+      console.error('Error al consultar sesiones:', error);
       return [];
     }
   }

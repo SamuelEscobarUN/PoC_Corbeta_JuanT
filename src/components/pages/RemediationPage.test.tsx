@@ -48,6 +48,12 @@ vi.mock('../../services/xml-generator', () => ({
   },
 }));
 
+vi.mock('../../services/session', () => ({
+  sessionService: {
+    listSessions: vi.fn().mockResolvedValue({ items: [], nextToken: null }),
+  },
+}));
+
 /** Datos de prueba */
 const mockFindings: Finding[] = [
   {
